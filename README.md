@@ -69,11 +69,11 @@ JDirectItems Auction and Mercari support all three platforms. JDirectItems Flea
 Market uses the user-specified ZenMarket route assumption
 `product.aspx?shop=yahooFleaMarket&itemCode=<id>`; this route has not been
 live-verified. ZenMarket Shopping (`shop=yshopping`) is not treated as Flea Market.
-The panel does not read or change the highlighter registry. ZenMarket and Neokyo
-favicons are embedded. Buyee uses its native favicon URL so the browser can use
-its cached copy; if it is not cached, the browser may request it. Destination
-sites are opened only when a link is clicked. Equivalent IDs do not guarantee a
-listing remains available.
+The panel does not read or change the highlighter registry. Each button uses its
+destination site's native favicon URL; the browser uses its cache when available
+and may request an icon on a cache miss. No item or search pages are requested in
+the background. Destination pages open only when a link is clicked. Equivalent
+IDs do not guarantee a listing remains available.
 
 ## Local Checks
 

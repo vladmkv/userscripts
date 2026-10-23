@@ -221,11 +221,12 @@ test('platform links reject unrelated shops, invalid URLs and deceptive hosts', 
 test('platform panel metadata includes update URLs and does not request storage or network grants', () => {
     new vm.Script(itemLinksSource);
     assert.ok(itemLinksSource.includes('// @grant        none'));
+    assert.ok(itemLinksSource.includes('// @icon         https://buyee.jp/favicon.ico'));
     assert.ok(itemLinksSource.includes('https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Platform-Item-Links.user.js'));
     assert.equal(/\b(?:fetch|GM_xmlhttpRequest|GM_setValue|GM_getValue)\s*\(/.test(itemLinksSource), false);
 });
 
-test('platform button icons precede labels, use embedded PNGs and have a fallback', () => {
+test('platform button icons precede labels and use the matching site favicon URL', () => {
     const context = {
         URL,
         document: {
@@ -234,23 +235,21 @@ test('platform button icons precede labels, use embedded PNGs and have a fallbac
     };
     vm.createContext(context);
     vm.runInContext(itemLinksSource.replace('    renderPanel();', '    globalThis.appendSiteLabel = appendSiteLabel;'), context);
-    for (const site of ['Buyee', 'ZenMarket', 'Neokyo']) {
+    const expectedFavicons = {
+        Buyee: 'https://buyee.jp/favicon.ico',
+        ZenMarket: 'https://zenmarket.jp/favicon.ico',
+        Neokyo: 'https://neokyo.com/favicon.ico'
+    };
+    for (const site of Object.keys(expectedFavicons)) {
         const control = { append(...children) { this.children = children; } };
         context.appendSiteLabel(control, site);
         const [icon, label] = control.children;
         assert.equal(label.textContent, site);
         assert.equal(icon.className, 'favicon');
         assert.equal(icon.attributes['aria-hidden'], 'true');
-        if (site === 'Buyee') {
-            assert.equal(icon.tag, 'img');
-            assert.equal(icon.src, 'https://buyee.jp/favicon.ico');
-        } else {
-            assert.equal(icon.tag, 'img');
-            assert.equal(icon.width, 18);
-            assert.ok(icon.src.startsWith('data:image/png;base64,'));
-            const bytes = Buffer.from(icon.src.split(',')[1], 'base64');
-            assert.equal(bytes.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
-        }
+        assert.equal(icon.tag, 'img');
+        assert.equal(icon.src, expectedFavicons[site]);
+        assert.equal(icon.width, 18);
     }
     assert.match(itemLinksSource, /\.links \{[^}]*flex-direction: column/);
 });
