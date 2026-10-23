@@ -1,0 +1,62 @@
+# Userscripts
+
+Independent Tampermonkey scripts for Japanese shopping search pages.
+
+## Install
+
+Install Tampermonkey in Chrome, then open a raw script link:
+
+- [Cross-Market Seen Item Highlighter](https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js)
+- [Neokyo Yahoo Category Selector](https://raw.githubusercontent.com/vladmkv/userscripts/main/Neokyo-Category-Selector.user.js)
+
+If the highlighter is already installed, update that existing Tampermonkey entry
+rather than deleting it or creating a second copy. Its name and namespace are
+unchanged to preserve the existing script identity and stored registry. Back up
+Tampermonkey data before changing an installation that contains valuable history.
+
+Tampermonkey periodically checks the update URL. Published changes must increment
+the script's `@version`. Reload site tabs after installing an update. These
+user-owned scripts are not affiliated with the supported websites.
+
+## Seen Item Highlighter
+
+Uses one Tampermonkey registry across Buyee, ZenMarket and Neokyo. Existing seen
+items receive a pale red background and dashed red border. Search items are
+recorded when their cards leave the viewport above it, or during a bottom-of-page
+scan. Buyee Mercari retains its original bottom-scan-only behavior. Opening a
+supported ZenMarket detail page also records the item.
+
+Buyee localStorage is imported once per origin. After migration, both reads and
+writes use Tampermonkey storage; the original localStorage remains untouched.
+Raw item IDs are retained for compatibility, so unrelated marketplaces with
+colliding IDs cannot be distinguished. Concurrent tab writes are not transactional.
+The registry retains up to 60,000 seen records under normal operation.
+
+Current Neokyo searches: Yahoo Auction, Mercari, Yahoo Flea Market. Selectors depend
+on site markup and may need maintenance. Matching a userscript URL alone does not
+guarantee every page layout is supported. No browser history or registry export is
+stored in this repository.
+
+## Neokyo Category Selector
+
+Adds cascading Yahoo Auction category dropdowns, initially set to portable cassette
+players with the category lock off. Category choices come from Neokyo's category
+API and are cached for the current page. Use Apply category to navigate while
+preserving other URL filters and returning to page 1.
+
+Lock category retains the selected category across search forms, pagination links,
+and subsequent page loads. Pagination is preserved when correcting dropped
+categories. All categories clears the category restriction and disables the lock.
+The selector is limited to Neokyo's English Yahoo Auction search, not Mercari or
+Yahoo Flea Market, and remains separate from seen-item tracking.
+
+## Local Checks
+
+Requires Node.js 18 or later; no package installation is needed:
+
+```powershell
+node --test tests/userscripts.test.cjs
+```
+
+Tests exercise URL handling, metadata, and a simulated userscript DOM/storage
+environment. They do not replace a Chrome/Tampermonkey end-to-end check.
