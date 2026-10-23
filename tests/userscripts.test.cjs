@@ -209,7 +209,7 @@ for (const marketplace of ['yahoo', 'mercari', 'yahooFleaMarket']) {
             const item = `https://neokyo.com/en/product/${marketplace}/m42470092884?search_phrase=test`;
             const existing = scan(url, item, true);
             assert.equal(existing.wrapper.style.display, 'none');
-            assert.equal(existing.card.style.border, undefined);
+            assert.equal(existing.card.style.border, '4px dashed #e74c3c');
             const unseen = scan(url, item, false);
             assert.equal(unseen.card.style.backgroundColor, undefined);
             const scrolled = scan(url, item, false, true);
@@ -219,7 +219,7 @@ for (const marketplace of ['yahoo', 'mercari', 'yahooFleaMarket']) {
             assert.equal(scrolled.wrapper.style.display, undefined);
             const reloaded = scan(url, item, false, false, scrolled.storage);
             assert.equal(reloaded.wrapper.style.display, 'none');
-            assert.equal(reloaded.card.style.border, undefined);
+            assert.equal(reloaded.card.style.border, '4px dashed #e74c3c');
         });
     }
 }
@@ -299,6 +299,7 @@ test('search panel shows counts, temporarily reveals hidden items and backs up s
     const toggle = findByAction(result.body, 'toggle-hidden');
     toggle.listeners.click();
     assert.equal(result.wrapper.style.display, '');
+    assert.equal(result.card.style.border, '4px dashed #e74c3c');
     assert.equal(toggle.attributes['aria-pressed'], 'true');
     result.tick();
     assert.equal(result.wrapper.style.display, '');
