@@ -166,3 +166,91 @@ test('late shared-storage updates do not hide or frame cards in this visit', () 
     assert.equal(result.wrapper.style.display, undefined);
     assert.equal(result.card.style.border, undefined);
 });
+
+const itemLinksSource = fs.readFileSync(path.join(root, 'Cross-Platform-Item-Links.user.js'), 'utf8');
+const itemLinksContext = { URL };
+vm.createContext(itemLinksContext);
+vm.runInContext(itemLinksSource.replace('    renderPanel();', '    globalThis.api = { identifyItem, destinationLinks };'), itemLinksContext);
+const itemLinksApi = itemLinksContext.api;
+
+const itemExamples = [
+    ['https://buyee.jp/item/jdirectitems/auction/1248800526?conversionType=mypage_watch_list', 'yahoo', '1248800526'],
+    ['https://buyee.jp/mercari/item/2JYT9KEfHQbS7hkiqhqnLD?conversionType=Mercari_DirectSearch', 'mercari', '2JYT9KEfHQbS7hkiqhqnLD'],
+    ['https://buyee.jp/paypayfleamarket/item/z708672664?conversionType=jdirectitems_auction_DirectSearch', 'flea', 'z708672664'],
+    ['https://zenmarket.jp/auction.aspx?itemCode=x1248934501&cs=4', 'yahoo', 'x1248934501'],
+    ['https://zenmarket.jp/product.aspx?shop=mercari&itemCode=m42470092884', 'mercari', 'm42470092884'],
+    ['https://zenmarket.jp/product.aspx?shop=yahooFleaMarket&itemCode=z708672664', 'flea', 'z708672664'],
+    ['https://neokyo.com/en/product/yahoo/m1248475288', 'yahoo', 'm1248475288'],
+    ['https://neokyo.com/en/product/mercari/m42470092884', 'mercari', 'm42470092884'],
+    ['https://neokyo.com/en/product/yahooFleaMarket/b1249471224', 'flea', 'b1249471224']
+];
+
+for (const [href, marketplace, id] of itemExamples) {
+    test(`platform links preserve marketplace and exact ID: ${href}`, () => {
+        const item = itemLinksApi.identifyItem(href);
+        assert.equal(item.marketplace, marketplace);
+        assert.equal(item.id, id);
+        const links = itemLinksApi.destinationLinks(item);
+        assert.equal(links.length, 3);
+        for (const link of links) {
+            assert.ok(link.href);
+            const destination = itemLinksApi.identifyItem(link.href);
+            assert.equal(destination.id, id);
+            assert.equal(destination.marketplace, marketplace);
+            assert.equal(destination.site, link.site);
+            assert.equal(new URL(link.href).searchParams.has('conversionType'), false);
+        }
+    });
+}
+
+test('platform links reject unrelated shops, invalid URLs and deceptive hosts', () => {
+    for (const href of [
+        'https://zenmarket.jp/product.aspx?shop=yshopping&itemCode=suntop-store_6202-25800',
+        'https://zenmarket.jp/product.aspx?itemCode=m42470092884',
+        'https://zenmarket.jp/auction.aspx?itemCode=',
+        'https://buyee.jp.example.com/mercari/item/m42470092884',
+        'https://neokyo.com/en/search/mercari',
+        'https://neokyo.com/en/product/rakuma/m42470092884',
+        'https://neokyo.com/en/product/mercari/m42470092884/extra',
+        'https://zenmarket.jp/auction.aspx?itemCode=%3Cscript%3E',
+        'not a URL'
+    ]) assert.equal(itemLinksApi.identifyItem(href), null, href);
+    assert.equal(itemLinksApi.identifyItem('https://neokyo.com/en/product/yahoo/m42470092884').marketplace, 'yahoo');
+});
+
+test('platform panel metadata includes update URLs and does not request storage or network grants', () => {
+    new vm.Script(itemLinksSource);
+    assert.ok(itemLinksSource.includes('// @grant        none'));
+    assert.ok(itemLinksSource.includes('https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Platform-Item-Links.user.js'));
+    assert.equal(/\b(?:fetch|GM_xmlhttpRequest|GM_setValue|GM_getValue)\s*\(/.test(itemLinksSource), false);
+});
+
+test('platform button icons precede labels, use embedded PNGs and have a fallback', () => {
+    const context = {
+        URL,
+        document: {
+            createElement: tag => ({ tag, attributes: {}, setAttribute(name, value) { this.attributes[name] = value; } })
+        }
+    };
+    vm.createContext(context);
+    vm.runInContext(itemLinksSource.replace('    renderPanel();', '    globalThis.appendSiteLabel = appendSiteLabel;'), context);
+    for (const site of ['Buyee', 'ZenMarket', 'Neokyo']) {
+        const control = { append(...children) { this.children = children; } };
+        context.appendSiteLabel(control, site);
+        const [icon, label] = control.children;
+        assert.equal(label.textContent, site);
+        assert.equal(icon.className, 'favicon');
+        assert.equal(icon.attributes['aria-hidden'], 'true');
+        if (site === 'Buyee') {
+            assert.equal(icon.tag, 'img');
+            assert.equal(icon.src, 'https://buyee.jp/favicon.ico');
+        } else {
+            assert.equal(icon.tag, 'img');
+            assert.equal(icon.width, 18);
+            assert.ok(icon.src.startsWith('data:image/png;base64,'));
+            const bytes = Buffer.from(icon.src.split(',')[1], 'base64');
+            assert.equal(bytes.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+        }
+    }
+    assert.match(itemLinksSource, /\.links \{[^}]*flex-direction: column/);
+});

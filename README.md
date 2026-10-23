@@ -8,6 +8,7 @@ Install Tampermonkey in Chrome, then open a raw script link:
 
 - [Cross-Market Seen Item Highlighter](https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js)
 - [Neokyo Yahoo Category Selector](https://raw.githubusercontent.com/vladmkv/userscripts/main/Neokyo-Category-Selector.user.js)
+- [Cross-Platform Item Links](https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Platform-Item-Links.user.js)
 
 If the highlighter is already installed, update that existing Tampermonkey entry
 rather than deleting it or creating a second copy. Its name and namespace are
@@ -55,6 +56,24 @@ and subsequent page loads. Pagination is preserved when correcting dropped
 categories. All categories clears the category restriction and disables the lock.
 The selector is limited to Neokyo's English Yahoo Auction search, not Mercari or
 Yahoo Flea Market, and remains separate from seen-item tracking.
+
+## Cross-Platform Item Links
+
+A separate lower-left panel with vertically stacked platform buttons opens the same item
+on Buyee, ZenMarket or Neokyo in a new tab. The marketplace is derived from the
+URL path or explicit shop parameter, never from the ID prefix. Item IDs retain
+their original case and characters; conversion and search-tracking parameters
+are not copied to destination links.
+
+JDirectItems Auction and Mercari support all three platforms. JDirectItems Flea
+Market uses the user-specified ZenMarket route assumption
+`product.aspx?shop=yahooFleaMarket&itemCode=<id>`; this route has not been
+live-verified. ZenMarket Shopping (`shop=yshopping`) is not treated as Flea Market.
+The panel does not read or change the highlighter registry. ZenMarket and Neokyo
+favicons are embedded. Buyee uses its native favicon URL so the browser can use
+its cached copy; if it is not cached, the browser may request it. Destination
+sites are opened only when a link is clicked. Equivalent IDs do not guarantee a
+listing remains available.
 
 ## Local Checks
 
