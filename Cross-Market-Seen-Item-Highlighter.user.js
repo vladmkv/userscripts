@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Market Seen Item Highlighter
 // @namespace    http://tampermonkey.net
-// @version      7.18
+// @version      7.19
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
 // @downloadURL  https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
 // @description  Tracks seen item IDs across Buyee, ZenMarket, and Neokyo search feeds.
@@ -106,6 +106,8 @@
     }
 
     let itemRegistry = loadRegistry();
+    const seenAtPageLoad = new Set(Object.keys(itemRegistry).filter(id => itemRegistry[id] === 'hide'));
+    const seenThisVisit = new Set();
     let neokyoCardDiagnosticReported = false;
     let neokyoProcessEntryReported = false;
     const neokyoDiagnosticStartedAt = Date.now();
@@ -195,6 +197,12 @@
         card.style.backgroundColor = '#fdf2f2';
     }
 
+    function hideSeenItem(card) {
+        const wrapper = isZenMarketSearch() ? card.closest('.product')
+            : isNeokyoSearch() ? card.closest('.col-lg-3, .col-md-4, .col-xs-6') : null;
+        (wrapper || card).style.display = 'none';
+    }
+
     function processZenMarketItemPage() {
         if (!isZenMarketItemPage()) return false;
 
@@ -210,17 +218,9 @@
             console.info(`[Cross-Market Seen Item Highlighter] Marked ZenMarket item ${itemId} as seen.`);
         }
 
-        const productTitle = document.querySelector('#productContainer .product_title, .product-post .product_title');
-        const itemContainer = document.querySelector('#productContainer')
-            || productTitle?.closest('.product-post')
-            || productTitle?.parentElement
-            || document.querySelector('main')
-            || document.body;
-        paintSeenItem(itemContainer);
         return true;
     }
 
-    // just collect items to db while scrolling and paint collected red. No hiding here.
     function processStateEngine() {
         if (isNeokyoSearch() && !neokyoProcessEntryReported) {
             console.info(`[Cross-Market Seen Item Highlighter] Neokyo scan callback entered on ${location.pathname}.`);
@@ -233,6 +233,8 @@
         }
 
         if (processZenMarketItemPage()) return;
+        if (!isZenMarketSearch() && !isNeokyoSearch()
+            && !(isBuyeeSite() && /^\/(?:item|mercari)\/search(?:\/|$)/.test(location.pathname))) return;
 
         const cards = getTargetListingCards();
         const userReachedBottom = isAtPageBottom();
@@ -261,12 +263,17 @@
 
             if (!itemId) return;
             if (isBuyeeSite() && ['jdirectitems', 'auction', 'item', 'search', 'mercari'].includes(itemId)) return;
-            const currentState = itemRegistry[itemId];
 
-            if (currentState === 'hide') {
+            if (seenAtPageLoad.has(itemId)) {
+                hideSeenItem(card);
+                return;
+            }
+
+            if (seenThisVisit.has(itemId)) {
                 paintSeenItem(card);
                 return;
             }
+            if (itemRegistry[itemId] === 'hide') return;
 
             const position = card.getBoundingClientRect();
             const hasCompletelyLeftScreen = isMercari ? false : (position.bottom < 0);
@@ -274,6 +281,7 @@
 
             if (hasCompletelyLeftScreen || visibleAtBottomSweep) {
                 itemRegistry[itemId] = 'hide';
+                seenThisVisit.add(itemId);
                 saveToMemory();
                 paintSeenItem(card);
                 window.dispatchEvent(new CustomEvent('buyeeItemSeen', { detail: { id: itemId } }));

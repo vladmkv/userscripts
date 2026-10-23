@@ -42,16 +42,21 @@ test('category URLs preserve filters, clear descendants and control pagination',
     assert.equal(api.isYahooSearch(new URL('https://other.example/en/search/yahoo')), false);
 });
 
-function scan(pageUrl, itemUrl, seen, offscreen = false) {
+function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBottom = false) {
     const location = new URL(pageUrl);
     const id = location.hostname === 'zenmarket.jp'
         ? new URL(itemUrl).searchParams.get('itemCode')
         : new URL(itemUrl).pathname.split('/').filter(Boolean).at(-1);
-    const storage = { buyee_item_registry: seen ? { [id]: 'hide' } : {} };
+    const storage = existingStorage || {
+        buyee_item_registry: seen ? { [id]: 'hide' } : {},
+        buyee_item_registry_migrated_origins: [location.origin]
+    };
+    const wrapper = { style: {} };
     const card = {
         tagName: location.hostname === 'zenmarket.jp' ? 'A' : 'DIV',
         href: itemUrl,
         style: {},
+        closest: () => wrapper,
         getBoundingClientRect: () => ({ top: offscreen ? -200 : 100, bottom: offscreen ? -10 : 300 })
     };
     const link = { href: itemUrl, closest: () => card };
@@ -59,45 +64,105 @@ function scan(pageUrl, itemUrl, seen, offscreen = false) {
     let tick;
     const context = {
         URL, location, console: { info() {}, log() {}, warn() {}, error(error) { throw error; } },
-        GM_getValue: (key, fallback) => storage[key] ?? fallback,
-        GM_setValue: (key, value) => { storage[key] = value; },
+        GM_getValue: (key, fallback) => structuredClone(storage[key] ?? fallback),
+        GM_setValue: (key, value) => { storage[key] = structuredClone(value); },
         document: {
-            documentElement: { scrollHeight: 5000 },
+            title: 'Item results',
+            body: { innerText: 'Product information', style: {} },
+            documentElement: { scrollHeight: atBottom ? 900 : 5000 },
             querySelectorAll: query => {
                 if (query.startsWith('a[href*=')) return [link];
-                if (query.includes('product-item') || query === '.product-card.auction') return [card];
+                if (query.includes('product-item') || query === '.product-card.auction'
+                    || query.startsWith('#content_inner')) return [card];
                 return [];
             }
         },
-        window: { innerHeight: 900, scrollY: 0, addEventListener() {}, dispatchEvent() {} },
+        window: { innerHeight: 900, scrollY: 0, pageYOffset: 0, addEventListener() {}, dispatchEvent() {} },
         CustomEvent: class {},
         setTimeout() {},
         setInterval: callback => { tick = callback; }
     };
     vm.runInNewContext(highlighter, context);
     tick();
-    return { card, storage, id };
+    return { card, wrapper, storage, id, tick, document: context.document };
 }
 
 for (const marketplace of ['yahoo', 'mercari', 'yahooFleaMarket']) {
     for (const slash of ['', '/']) {
-        test(`Neokyo ${marketplace}${slash}: paint stored IDs and save off-screen IDs`, () => {
+        test(`Neokyo ${marketplace}${slash}: hide stored IDs and frame new IDs until reload`, () => {
             const url = `https://neokyo.com/en/search/${marketplace}${slash}?page=2`;
             const item = `https://neokyo.com/en/product/${marketplace}/m42470092884?search_phrase=test`;
             const existing = scan(url, item, true);
-            assert.equal(existing.card.style.backgroundColor, '#fdf2f2');
+            assert.equal(existing.wrapper.style.display, 'none');
+            assert.equal(existing.card.style.border, undefined);
             const unseen = scan(url, item, false);
             assert.equal(unseen.card.style.backgroundColor, undefined);
             const scrolled = scan(url, item, false, true);
             assert.equal(scrolled.storage.buyee_item_registry[scrolled.id], 'hide');
             assert.equal(scrolled.card.style.backgroundColor, '#fdf2f2');
+            scrolled.tick();
+            assert.equal(scrolled.wrapper.style.display, undefined);
+            const reloaded = scan(url, item, false, false, scrolled.storage);
+            assert.equal(reloaded.wrapper.style.display, 'none');
+            assert.equal(reloaded.card.style.border, undefined);
         });
     }
 }
 
 for (const route of ['product', 'auction']) {
-    test(`ZenMarket ${route} result cards use the shared registry`, () => {
-        const result = scan('https://zenmarket.jp/en/search.aspx?ucid=6585', `https://zenmarket.jp/${route}.aspx?itemCode=x1248934501`, true);
-        assert.equal(result.card.style.backgroundColor, '#fdf2f2');
+    test(`ZenMarket ${route} results hide old IDs and frame new IDs until reload`, () => {
+        const url = 'https://zenmarket.jp/en/search.aspx?ucid=6585';
+        const item = `https://zenmarket.jp/${route}.aspx?itemCode=x1248934501`;
+        const result = scan(url, item, true);
+        assert.equal(result.wrapper.style.display, 'none');
+        const scrolled = scan(url, item, false, true);
+        assert.equal(scrolled.card.style.border, '4px dashed #e74c3c');
+        scrolled.tick();
+        assert.equal(scrolled.wrapper.style.display, undefined);
+        assert.equal(scan(url, item, false, false, scrolled.storage).wrapper.style.display, 'none');
+    });
+
+    test(`ZenMarket ${route} detail remains visible and records its ID`, () => {
+        const item = `https://zenmarket.jp/${route}.aspx?itemCode=x1248934501`;
+        const result = scan(item, item, false);
+        assert.equal(result.storage.buyee_item_registry[result.id], 'hide');
+        assert.equal(result.document.body.style.display, undefined);
+        assert.equal(result.card.style.border, undefined);
+        assert.equal(result.wrapper.style.display, undefined);
     });
 }
+
+for (const marketplace of ['item', 'mercari']) {
+    test(`Buyee ${marketplace} results hide old IDs and frame newly seen IDs until reload`, () => {
+        const url = `https://buyee.jp/${marketplace}/search`;
+        const item = marketplace === 'mercari' ? 'https://buyee.jp/mercari/item/m42470092884'
+            : 'https://buyee.jp/item/jdirectitems/auction/x1248934501';
+        assert.equal(scan(url, item, true).card.style.display, 'none');
+        const result = scan(url, item, false, true, undefined, marketplace === 'mercari');
+        assert.equal(result.storage.buyee_item_registry[result.id], 'hide');
+        assert.equal(result.card.style.border, '4px dashed #e74c3c');
+        result.tick();
+        assert.equal(result.card.style.display, undefined);
+        assert.equal(scan(url, item, false, false, result.storage).card.style.display, 'none');
+    });
+}
+
+test('Buyee Mercari still requires a bottom sweep to mark unseen cards', () => {
+    const result = scan('https://buyee.jp/mercari/search', 'https://buyee.jp/mercari/item/m42470092884', false, true);
+    assert.equal(result.storage.buyee_item_registry[result.id], undefined);
+});
+
+test('Buyee detail pages do not hide cards or paint frames', () => {
+    const url = 'https://buyee.jp/item/jdirectitems/auction/x1248934501';
+    const result = scan(url, url, true);
+    assert.equal(result.card.style.display, undefined);
+    assert.equal(result.card.style.border, undefined);
+});
+
+test('late shared-storage updates do not hide or frame cards in this visit', () => {
+    const result = scan('https://neokyo.com/en/search/mercari', 'https://neokyo.com/en/product/mercari/m42470092884', false);
+    result.storage.buyee_item_registry[result.id] = 'hide';
+    result.tick();
+    assert.equal(result.wrapper.style.display, undefined);
+    assert.equal(result.card.style.border, undefined);
+});

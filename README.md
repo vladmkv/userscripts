@@ -20,11 +20,17 @@ user-owned scripts are not affiliated with the supported websites.
 
 ## Seen Item Highlighter
 
-Uses one Tampermonkey registry across Buyee, ZenMarket and Neokyo. Existing seen
-items receive a pale red background and dashed red border. Search items are
-recorded when their cards leave the viewport above it, or during a bottom-of-page
-scan. Buyee Mercari retains its original bottom-scan-only behavior. Opening a
-supported ZenMarket detail page also records the item.
+Uses one Tampermonkey registry across Buyee, ZenMarket and Neokyo. Search cards
+whose IDs were already stored when the page loaded are hidden. Items newly seen
+during the current visit are saved immediately and receive a pale red background
+and dashed red frame, but remain visible until reload. After reload, those saved
+items are hidden too. Grid wrappers are hidden along with cards where supported.
+
+Search items are recorded when their cards leave the viewport above it, or during
+a bottom-of-page scan. Buyee Mercari retains its original bottom-scan-only behavior.
+Individual product/auction detail pages remain visible and unframed. Opening a
+supported ZenMarket detail page still records the item. Records added in other tabs
+do not change the current page's startup snapshot; reload to hide those items.
 
 Buyee localStorage is imported once per origin. After migration, both reads and
 writes use Tampermonkey storage; the original localStorage remains untouched.
