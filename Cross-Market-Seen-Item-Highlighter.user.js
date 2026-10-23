@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Market Seen Item Highlighter
 // @namespace    http://tampermonkey.net
-// @version      7.19
+// @version      7.22
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
 // @downloadURL  https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
 // @description  Tracks seen item IDs across Buyee, ZenMarket, and Neokyo search feeds.
@@ -29,6 +29,10 @@
     const MAX_TRACKED_ITEMS = 60000;
     const REGISTRY_KEY = 'buyee_item_registry';
     const MIGRATED_ORIGINS_KEY = 'buyee_item_registry_migrated_origins';
+    const LEGACY_CLEANUP_ORIGINS_KEY = 'buyee_item_registry_legacy_cleanup_origins';
+    const PANEL_SIDE_KEY = 'seen_item_panel_side';
+    const BACKUP_FORMAT = 'cross-market-seen-items-backup';
+    const MAX_BACKUP_BYTES = 20 * 1024 * 1024;
 
     function isBuyeeSite() {
         return location.hostname === 'buyee.jp' || location.hostname.endsWith('.buyee.jp');
@@ -52,16 +56,6 @@
         return isZenMarketSite() && ['/product.aspx', '/auction.aspx'].includes(location.pathname.toLowerCase());
     }
 
-    function readLegacyBuyeeRegistry() {
-        try {
-            const stored = JSON.parse(unsafeWindow.localStorage.getItem(REGISTRY_KEY)) || {};
-            return stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {};
-        } catch (error) {
-            console.warn('Could not read the legacy Buyee registry', error);
-            return null;
-        }
-    }
-
     function loadRegistry() {
         const storedRegistry = GM_getValue(REGISTRY_KEY, {});
         const registry = storedRegistry && typeof storedRegistry === 'object' && !Array.isArray(storedRegistry)
@@ -71,27 +65,25 @@
         if (isBuyeeSite()) {
             const migratedOriginsValue = GM_getValue(MIGRATED_ORIGINS_KEY, []);
             const migratedOrigins = Array.isArray(migratedOriginsValue) ? migratedOriginsValue : [];
+            const cleanupOriginsValue = GM_getValue(LEGACY_CLEANUP_ORIGINS_KEY, []);
+            const cleanupOrigins = Array.isArray(cleanupOriginsValue) ? cleanupOriginsValue : [];
             const currentOrigin = location.origin;
 
             if (migratedOrigins.includes(currentOrigin)) {
+                if (!cleanupOrigins.includes(currentOrigin)) {
+                    try {
+                        unsafeWindow.localStorage.removeItem(REGISTRY_KEY);
+                        GM_setValue(LEGACY_CLEANUP_ORIGINS_KEY, [...cleanupOrigins, currentOrigin]);
+                        console.info(`[Cross-Market Seen Item Highlighter] Removed legacy localStorage registry for ${currentOrigin}; shared Tampermonkey data is preserved.`);
+                    } catch (error) {
+                        console.warn(`[Cross-Market Seen Item Highlighter] Could not remove legacy localStorage registry for ${currentOrigin}.`, error);
+                    }
+                }
                 console.info(`[Cross-Market Seen Item Highlighter] Shared registry ready for ${currentOrigin}; previously migrated with ${Object.keys(registry).length} records.`);
                 return registry;
             }
 
-            const legacyRegistry = readLegacyBuyeeRegistry();
-            if (!legacyRegistry) return registry;
-
-            let importedCount = 0;
-            Object.entries(legacyRegistry).forEach(([id, state]) => {
-                if (!(id in registry)) {
-                    registry[id] = state;
-                    importedCount++;
-                }
-            });
-
-            GM_setValue(REGISTRY_KEY, registry);
-            GM_setValue(MIGRATED_ORIGINS_KEY, [...migratedOrigins, currentOrigin]);
-            console.info(`[Cross-Market Seen Item Highlighter] Migration complete for ${currentOrigin}: imported ${importedCount} records; ${Object.keys(registry).length} total in shared storage.`);
+            console.warn(`[Cross-Market Seen Item Highlighter] No migration marker for ${currentOrigin}; legacy localStorage was left untouched.`);
         }
 
         if (isZenMarketSearch()) {
@@ -108,6 +100,13 @@
     let itemRegistry = loadRegistry();
     const seenAtPageLoad = new Set(Object.keys(itemRegistry).filter(id => itemRegistry[id] === 'hide'));
     const seenThisVisit = new Set();
+    const pendingWrites = new Set();
+    const hiddenElements = new Set();
+    let showHidden = false;
+    let panelElements = null;
+    let writeRetryAt = 0;
+    let writeRetryDelay = 5000;
+    let lastWriteError = '';
     let neokyoCardDiagnosticReported = false;
     let neokyoProcessEntryReported = false;
     const neokyoDiagnosticStartedAt = Date.now();
@@ -117,19 +116,208 @@
         console.info(`[Cross-Market Seen Item Highlighter] Neokyo userscript active on ${location.pathname}; shared registry has ${Object.keys(itemRegistry).length} records.`);
     }
 
-    function saveToMemory() {
-        let registryKeys = Object.keys(itemRegistry);
-        if (registryKeys.length > MAX_TRACKED_ITEMS) {
-            let discardableIds = registryKeys.filter(id => itemRegistry[id] === 'hide');
-            let overflowCount = registryKeys.length - MAX_TRACKED_ITEMS;
-            if (discardableIds.length > 0 && overflowCount > 0) {
-                let itemsToRemove = Math.min(overflowCount, discardableIds.length);
-                for (let i = 0; i < itemsToRemove; i++) {
-                    delete itemRegistry[discardableIds[i]];
-                }
+    function readStoredRegistry() {
+        const stored = GM_getValue(REGISTRY_KEY, {});
+        return stored && typeof stored === 'object' && !Array.isArray(stored) ? { ...stored } : {};
+    }
+
+    function pruneRegistry(registry) {
+        const registryKeys = Object.keys(registry);
+        const overflowCount = registryKeys.length - MAX_TRACKED_ITEMS;
+        if (overflowCount <= 0) return;
+        const discardableIds = registryKeys.filter(id => registry[id] === 'hide');
+        const itemsToRemove = Math.min(overflowCount, discardableIds.length);
+        for (let i = 0; i < itemsToRemove; i++) {
+            delete registry[discardableIds[i]];
+        }
+    }
+
+    function markSeen(itemId) {
+        itemRegistry[itemId] = 'hide';
+        pendingWrites.add(itemId);
+    }
+
+    // GM_setValue returns nothing, so success is confirmed by reading the value back.
+    function saveVerified(registry) {
+        GM_setValue(REGISTRY_KEY, registry);
+        const saved = readStoredRegistry();
+        const ids = Object.keys(registry);
+        const missing = ids.filter(id => saved[id] !== registry[id]);
+        if (missing.length > 0) {
+            throw new Error(`${missing.length} of ${ids.length} items were missing after saving`);
+        }
+        return saved;
+    }
+
+    // Merges with the latest stored copy so writes from other tabs are not overwritten.
+    function flushPendingWrites() {
+        if (pendingWrites.size === 0 || Date.now() < writeRetryAt) return;
+        const ids = [...pendingWrites];
+        try {
+            const latest = readStoredRegistry();
+            ids.forEach(id => { latest[id] = 'hide'; });
+            pruneRegistry(latest);
+            const saved = saveVerified(latest);
+            ids.forEach(id => pendingWrites.delete(id));
+            itemRegistry = saved;
+            writeRetryAt = 0;
+            writeRetryDelay = 5000;
+            lastWriteError = '';
+        } catch (error) {
+            writeRetryAt = Date.now() + writeRetryDelay;
+            writeRetryDelay = Math.min(writeRetryDelay * 2, 60000);
+            const errorKey = `${error?.name || 'Error'}: ${error?.message || error}`;
+            if (errorKey !== lastWriteError) {
+                console.error(`[Cross-Market Seen Item Highlighter] Saving ${ids.length} seen items failed; will retry.`, error);
+                lastWriteError = errorKey;
             }
         }
-        GM_setValue(REGISTRY_KEY, itemRegistry);
+    }
+
+    function downloadBackup() {
+        const registry = readStoredRegistry();
+        pendingWrites.forEach(id => { registry[id] = 'hide'; });
+        const backup = {
+            format: BACKUP_FORMAT,
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            itemCount: Object.keys(registry).length,
+            migratedOrigins: GM_getValue(MIGRATED_ORIGINS_KEY, []),
+            registry
+        };
+        const url = URL.createObjectURL(new Blob([JSON.stringify(backup)], { type: 'application/json' }));
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `seen-items-backup-${backup.exportedAt.replace(/[:.]/g, '-')}.json`;
+        document.body.append(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    function isValidRegistry(registry) {
+        return registry && typeof registry === 'object' && !Array.isArray(registry)
+            && Object.entries(registry).every(([id, value]) => /^[a-zA-Z0-9_-]+$/.test(id) && typeof value === 'string');
+    }
+
+    function applyBackup(text) {
+        let backup = null;
+        try {
+            backup = JSON.parse(text);
+        } catch {
+            backup = null;
+        }
+        if (backup?.format !== BACKUP_FORMAT || !isValidRegistry(backup.registry)) {
+            window.alert('Restore failed: this is not a seen-items backup file.');
+            return;
+        }
+        const current = readStoredRegistry();
+        const currentCount = Object.keys(current).length;
+        const backupCount = Object.keys(backup.registry).length;
+        let restored;
+        if (window.confirm(`Merge ${backupCount} backed-up items into the ${currentCount} stored items?\n\nOK = merge. Cancel = choose replace instead.`)) {
+            restored = { ...current, ...backup.registry };
+        } else if (window.confirm(`Replace all ${currentCount} stored items with the ${backupCount} backed-up items?\n\nItems not in the backup will be forgotten.`)) {
+            restored = { ...backup.registry };
+        } else {
+            return;
+        }
+        pendingWrites.forEach(id => { restored[id] = 'hide'; });
+        pruneRegistry(restored);
+        try {
+            itemRegistry = saveVerified(restored);
+            pendingWrites.clear();
+            window.alert(`Restore complete: ${Object.keys(itemRegistry).length} items stored. Reload to hide restored items on this page.`);
+        } catch (error) {
+            console.error('[Cross-Market Seen Item Highlighter] Restore failed.', error);
+            window.alert('Restore failed: the data could not be saved completely. Try restoring the backup again.');
+        }
+        updatePanel();
+    }
+
+    function chooseBackupFile() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'application/json,.json';
+        input.addEventListener('change', async () => {
+            const file = input.files?.[0];
+            if (!file) return;
+            if (file.size > MAX_BACKUP_BYTES) {
+                window.alert('Restore failed: the file is too large to be a seen-items backup.');
+                return;
+            }
+            applyBackup(await file.text());
+        });
+        input.click();
+    }
+
+    function applyPanelSide() {
+        const side = GM_getValue(PANEL_SIDE_KEY, 'left') === 'right' ? 'right' : 'left';
+        panelElements.host.style.left = side === 'left' ? '12px' : '';
+        panelElements.host.style.right = side === 'right' ? '12px' : '';
+        panelElements.move.textContent = side === 'left' ? 'Move panel right' : 'Move panel left';
+    }
+
+    function movePanel() {
+        GM_setValue(PANEL_SIDE_KEY, GM_getValue(PANEL_SIDE_KEY, 'left') === 'right' ? 'left' : 'right');
+        applyPanelSide();
+    }
+
+    function toggleHiddenItems() {
+        showHidden = !showHidden;
+        hiddenElements.forEach(element => { element.style.display = showHidden ? '' : 'none'; });
+        updatePanel();
+    }
+
+    function createButton(text, action, onClick) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = text;
+        button.setAttribute('data-action', action);
+        button.addEventListener('click', onClick);
+        return button;
+    }
+
+    function ensurePanel() {
+        if (panelElements || !document.body) return;
+        const host = document.createElement('div');
+        host.id = 'cross-market-seen-panel';
+        host.style.cssText = 'position:fixed;bottom:12px;z-index:2147483646;';
+        const root = host.attachShadow({ mode: 'open' });
+        const style = document.createElement('style');
+        style.textContent = `
+            section { box-sizing: border-box; display: flex; flex-direction: column; gap: 6px; width: 210px; padding: 10px; border: 1px solid #777; border-radius: 4px; background: #fff; color: #202020; box-shadow: 0 2px 8px #0003; font: 13px/1.4 Verdana, sans-serif; }
+            p { margin: 0; }
+            .pending { color: #b00020; }
+            button { min-height: 32px; padding: 5px 8px; border: 1px solid #777; border-radius: 3px; background: #f5f5f5; color: #202020; font: inherit; cursor: pointer; }
+            button:hover { background: #e5f3e8; }
+            button:focus-visible { outline: 2px solid #14652c; outline-offset: 2px; }
+        `;
+        const panel = document.createElement('section');
+        panel.setAttribute('aria-label', 'Seen item registry');
+        const total = document.createElement('p');
+        const hidden = document.createElement('p');
+        const pending = document.createElement('p');
+        pending.className = 'pending';
+        const toggle = createButton('Show hidden items', 'toggle-hidden', toggleHiddenItems);
+        const backup = createButton('Back up data', 'backup', downloadBackup);
+        const restore = createButton('Restore data', 'restore', chooseBackupFile);
+        const move = createButton('Move panel right', 'move-panel', movePanel);
+        panel.append(total, hidden, pending, toggle, backup, restore, move);
+        root.append(style, panel);
+        document.body.append(host);
+        panelElements = { host, total, hidden, pending, toggle, move };
+        applyPanelSide();
+    }
+
+    function updatePanel() {
+        if (!panelElements) return;
+        panelElements.total.textContent = `Stored items: ${Object.keys(itemRegistry).length}`;
+        panelElements.hidden.textContent = `Hidden on this page: ${hiddenElements.size}`;
+        panelElements.pending.hidden = pendingWrites.size === 0;
+        panelElements.pending.textContent = `Not yet saved: ${pendingWrites.size}`;
+        panelElements.toggle.textContent = showHidden ? 'Hide seen items' : 'Show hidden items';
+        panelElements.toggle.setAttribute('aria-pressed', String(showHidden));
     }
 
     function isAtPageBottom() {
@@ -200,7 +388,9 @@
     function hideSeenItem(card) {
         const wrapper = isZenMarketSearch() ? card.closest('.product')
             : isNeokyoSearch() ? card.closest('.col-lg-3, .col-md-4, .col-xs-6') : null;
-        (wrapper || card).style.display = 'none';
+        const target = wrapper || card;
+        hiddenElements.add(target);
+        target.style.display = showHidden ? '' : 'none';
     }
 
     function processZenMarketItemPage() {
@@ -213,10 +403,10 @@
         if (!itemId) return true;
 
         if (itemRegistry[itemId] !== 'hide') {
-            itemRegistry[itemId] = 'hide';
-            saveToMemory();
+            markSeen(itemId);
             console.info(`[Cross-Market Seen Item Highlighter] Marked ZenMarket item ${itemId} as seen.`);
         }
+        flushPendingWrites();
 
         return true;
     }
@@ -230,12 +420,14 @@
         const sharedRegistry = GM_getValue(REGISTRY_KEY, itemRegistry);
         if (sharedRegistry && typeof sharedRegistry === 'object' && !Array.isArray(sharedRegistry)) {
             itemRegistry = sharedRegistry;
+            pendingWrites.forEach(id => { itemRegistry[id] = 'hide'; });
         }
 
         if (processZenMarketItemPage()) return;
         if (!isZenMarketSearch() && !isNeokyoSearch()
             && !(isBuyeeSite() && /^\/(?:item|mercari)\/search(?:\/|$)/.test(location.pathname))) return;
 
+        ensurePanel();
         const cards = getTargetListingCards();
         const userReachedBottom = isAtPageBottom();
 
@@ -280,14 +472,16 @@
             const visibleAtBottomSweep = (userReachedBottom && position.top < window.innerHeight);
 
             if (hasCompletelyLeftScreen || visibleAtBottomSweep) {
-                itemRegistry[itemId] = 'hide';
+                markSeen(itemId);
                 seenThisVisit.add(itemId);
-                saveToMemory();
                 paintSeenItem(card);
                 window.dispatchEvent(new CustomEvent('buyeeItemSeen', { detail: { id: itemId } }));
                 console.log(itemId + " added as hidden");
             }
         });
+
+        flushPendingWrites();
+        updatePanel();
     }
 
     function runStateEngineSafely() {

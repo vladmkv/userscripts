@@ -100,7 +100,35 @@ test('stale category cache remains usable during a 429 cooldown', async () => {
     assert.equal(JSON.stringify(await api.getChildren(2, 1)), JSON.stringify(rows));
 });
 
-function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBottom = false) {
+function fakeElement(tag) {
+    const element = {
+        tag, style: {}, attributes: {}, children: [], listeners: {}, textContent: '', clicked: 0,
+        setAttribute(name, value) { this.attributes[name] = value; },
+        addEventListener(type, listener) { this.listeners[type] = listener; },
+        append(...nodes) { this.children.push(...nodes); },
+        remove() {},
+        click() { this.clicked++; },
+        attachShadow() { this.shadowRoot = fakeElement('#shadow'); return this.shadowRoot; }
+    };
+    return element;
+}
+
+function findByAction(root, action) {
+    if (!root) return undefined;
+    if (root.attributes?.['data-action'] === action) return root;
+    for (const child of [...(root.children || []), root.shadowRoot].filter(Boolean)) {
+        const found = findByAction(child, action);
+        if (found) return found;
+    }
+    return undefined;
+}
+
+function panelText(body) {
+    const section = body.children[0].shadowRoot.children.find(node => node.tag === 'section');
+    return section.children.filter(node => node.tag === 'p' && !node.hidden).map(node => node.textContent);
+}
+
+function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBottom = false, options = {}) {
     const location = new URL(pageUrl);
     const id = location.hostname === 'zenmarket.jp'
         ? new URL(itemUrl).searchParams.get('itemCode')
@@ -119,14 +147,35 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
     };
     const link = { href: itemUrl, closest: () => card };
     card.querySelector = () => link;
+    const legacyLocalStorage = {
+        buyee_item_registry: 'legacy-copy',
+        removeItem(key) { delete this[key]; }
+    };
     let tick;
+    const writes = [];
+    const errors = [];
+    const blobs = [];
+    const body = fakeElement('body');
+    body.innerText = 'Product information';
+    const created = [];
+    const TestURL = class extends URL {
+        static createObjectURL(blob) { blobs.push(blob); return 'blob:test'; }
+        static revokeObjectURL() {}
+    };
     const context = {
-        URL, location, console: { info() {}, log() {}, warn() {}, error(error) { throw error; } },
+        URL: TestURL, Blob, location,
+        console: { info() {}, log() {}, warn() {}, error(...args) { if (!options.allowErrors) throw args.at(-1); errors.push(args); } },
         GM_getValue: (key, fallback) => structuredClone(storage[key] ?? fallback),
-        GM_setValue: (key, value) => { storage[key] = structuredClone(value); },
+        GM_setValue: (key, value) => {
+            writes.push(key);
+            if (options.setValue) return options.setValue(key, value, storage);
+            storage[key] = structuredClone(value);
+        },
+        unsafeWindow: { localStorage: legacyLocalStorage },
         document: {
             title: 'Item results',
-            body: { innerText: 'Product information', style: {} },
+            body,
+            createElement: tag => { const element = fakeElement(tag); created.push(element); return element; },
             documentElement: { scrollHeight: atBottom ? 900 : 5000 },
             querySelectorAll: query => {
                 if (query.startsWith('a[href*=')) return [link];
@@ -135,14 +184,22 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
                 return [];
             }
         },
-        window: { innerHeight: 900, scrollY: 0, pageYOffset: 0, addEventListener() {}, dispatchEvent() {} },
+        window: { innerHeight: 900, scrollY: 0, pageYOffset: 0, addEventListener() {}, dispatchEvent() {}, confirm: options.confirm, alert: options.alert },
         CustomEvent: class {},
         setTimeout() {},
         setInterval: callback => { tick = callback; }
     };
+    if (options.now) context.Date = class extends Date { static now() { return options.now(); } };
     vm.runInNewContext(highlighter, context);
     tick();
-    return { card, wrapper, storage, id, tick, document: context.document };
+    const restore = async text => {
+        findByAction(body, 'restore').listeners.click();
+        const input = created.findLast(element => element.tag === 'input');
+        assert.equal(input.clicked, 1);
+        input.files = [{ size: text.length, text: async () => text }];
+        await input.listeners.change();
+    };
+    return { card, wrapper, storage, legacyLocalStorage, id, tick, document: context.document, body, writes, errors, blobs, restore };
 }
 
 for (const marketplace of ['yahoo', 'mercari', 'yahooFleaMarket']) {
@@ -217,6 +274,150 @@ test('Buyee detail pages do not hide cards or paint frames', () => {
     assert.equal(result.card.style.border, undefined);
 });
 
+test('legacy Buyee localStorage is removed only after migration and shared data is kept', () => {
+    const url = 'https://buyee.jp/item/search';
+    const item = 'https://buyee.jp/item/jdirectitems/auction/x1248934501';
+    const migrated = scan(url, item, true);
+    assert.equal(migrated.legacyLocalStorage.buyee_item_registry, undefined);
+    assert.equal(migrated.storage.buyee_item_registry.x1248934501, 'hide');
+    assert.deepEqual(migrated.storage.buyee_item_registry_legacy_cleanup_origins, ['https://buyee.jp']);
+
+    const unmarkedStorage = { buyee_item_registry: {}, buyee_item_registry_migrated_origins: [] };
+    const unmarked = scan(url, item, false, false, unmarkedStorage);
+    assert.equal(unmarked.legacyLocalStorage.buyee_item_registry, 'legacy-copy');
+    assert.equal(unmarked.storage.buyee_item_registry_legacy_cleanup_origins, undefined);
+});
+
+test('search panel shows counts, temporarily reveals hidden items and backs up storage', async () => {
+    const url = 'https://neokyo.com/en/search/mercari';
+    const item = 'https://neokyo.com/en/product/mercari/m42470092884';
+    const result = scan(url, item, true);
+    result.storage.buyee_item_registry.other = 'hide';
+    result.tick();
+    assert.deepEqual(panelText(result.body), ['Stored items: 2', 'Hidden on this page: 1']);
+
+    const toggle = findByAction(result.body, 'toggle-hidden');
+    toggle.listeners.click();
+    assert.equal(result.wrapper.style.display, '');
+    assert.equal(toggle.attributes['aria-pressed'], 'true');
+    result.tick();
+    assert.equal(result.wrapper.style.display, '');
+    toggle.listeners.click();
+    assert.equal(result.wrapper.style.display, 'none');
+    assert.deepEqual(Object.keys(result.storage.buyee_item_registry).sort(), ['m42470092884', 'other']);
+
+    findByAction(result.body, 'backup').listeners.click();
+    assert.equal(result.blobs.length, 1);
+    const backup = JSON.parse(await result.blobs[0].text());
+    assert.equal(backup.format, 'cross-market-seen-items-backup');
+    assert.equal(backup.itemCount, 2);
+    assert.deepEqual(backup.registry, { m42470092884: 'hide', other: 'hide' });
+    assert.deepEqual(backup.migratedOrigins, ['https://neokyo.com']);
+});
+
+test('detail pages do not show the panel', () => {
+    const item = 'https://zenmarket.jp/product.aspx?itemCode=x1248934501';
+    assert.equal(scan(item, item, false).body.children.length, 0);
+});
+
+test('newly seen items are saved once per scan and merged with other tabs', () => {
+    const url = 'https://neokyo.com/en/search/mercari';
+    const item = 'https://neokyo.com/en/product/mercari/m42470092884';
+    const result = scan(url, item, false, true, undefined, false, {
+        setValue(key, value, storage) {
+            storage[key] = { ...structuredClone(value), fromOtherTab: 'hide' };
+        }
+    });
+    assert.deepEqual(result.writes, ['buyee_item_registry']);
+    result.tick();
+    assert.deepEqual(result.writes, ['buyee_item_registry']);
+    assert.equal(result.storage.buyee_item_registry.fromOtherTab, 'hide');
+});
+
+test('failed read-back keeps items pending and retries after backoff', () => {
+    let now = 1000;
+    let failing = true;
+    const url = 'https://neokyo.com/en/search/mercari';
+    const item = 'https://neokyo.com/en/product/mercari/m42470092884';
+    const result = scan(url, item, false, true, undefined, false, {
+        allowErrors: true,
+        now: () => now,
+        setValue(key, value, storage) { if (!failing) storage[key] = structuredClone(value); }
+    });
+    assert.equal(result.storage.buyee_item_registry[result.id], undefined);
+    assert.equal(result.errors.length, 1);
+    assert.ok(panelText(result.body).includes('Not yet saved: 1'));
+
+    result.tick();
+    assert.equal(result.writes.length, 1);
+    failing = false;
+    now += 5000;
+    result.tick();
+    assert.equal(result.writes.length, 2);
+    assert.equal(result.storage.buyee_item_registry[result.id], 'hide');
+    assert.equal(result.errors.length, 1);
+    assert.equal(panelText(result.body).some(text => text.startsWith('Not yet saved')), false);
+});
+
+test('highlighter panel starts lower-left and remembers a move to the right', () => {
+    const url = 'https://neokyo.com/en/search/mercari';
+    const item = 'https://neokyo.com/en/product/mercari/m42470092884';
+    const result = scan(url, item, true);
+    const host = result.body.children[0];
+    assert.equal(host.style.left, '12px');
+    findByAction(result.body, 'move-panel').listeners.click();
+    assert.equal(host.style.right, '12px');
+    assert.equal(host.style.left, '');
+    assert.equal(result.storage.seen_item_panel_side, 'right');
+    assert.equal(scan(url, item, true, false, result.storage).body.children[0].style.right, '12px');
+});
+
+function restoreFrom(backupRegistry, answers, options = {}) {
+    const url = 'https://neokyo.com/en/search/mercari';
+    const item = 'https://neokyo.com/en/product/mercari/m42470092884';
+    const storage = { buyee_item_registry: { current: 'hide' }, buyee_item_registry_migrated_origins: ['https://neokyo.com'] };
+    const alerts = [];
+    const confirms = [...answers];
+    const result = scan(url, item, false, false, storage, false, {
+        ...options,
+        confirm: () => confirms.shift(),
+        alert: message => alerts.push(message)
+    });
+    const text = typeof backupRegistry === 'string' ? backupRegistry
+        : JSON.stringify({ format: 'cross-market-seen-items-backup', registry: backupRegistry });
+    return { result, alerts, text };
+}
+
+for (const [answers, expected] of [
+    [[true], { current: 'hide', restored: 'hide' }],
+    [[false, true], { restored: 'hide' }],
+    [[false, false], { current: 'hide' }]
+]) {
+    test(`restore with answers ${JSON.stringify(answers)} saves the expected registry`, async () => {
+        const { result, alerts, text } = restoreFrom({ restored: 'hide' }, answers);
+        await result.restore(text);
+        assert.deepEqual(result.storage.buyee_item_registry, expected);
+        assert.equal(alerts.length, answers.at(-1) ? 1 : 0);
+        if (answers.at(-1)) assert.match(alerts[0], /^Restore complete/);
+    });
+}
+
+test('restore rejects files that are not seen-item backups', async () => {
+    for (const text of ['not json', JSON.stringify({ registry: { a: 'hide' } }),
+        JSON.stringify({ format: 'cross-market-seen-items-backup', registry: { '<script>': 'hide' } })]) {
+        const restore = restoreFrom(text, [true]);
+        await restore.result.restore(restore.text);
+        assert.deepEqual(restore.result.storage.buyee_item_registry, { current: 'hide' });
+        assert.match(restore.alerts[0], /not a seen-items backup/);
+    }
+});
+
+test('restore reports a failed read-back', async () => {
+    const { result, alerts, text } = restoreFrom({ restored: 'hide' }, [true], { allowErrors: true, setValue() {} });
+    await result.restore(text);
+    assert.match(alerts[0], /^Restore failed: the data could not be saved/);
+});
+
 test('late shared-storage updates do not hide or frame cards in this visit', () => {
     const result = scan('https://neokyo.com/en/search/mercari', 'https://neokyo.com/en/product/mercari/m42470092884', false);
     result.storage.buyee_item_registry[result.id] = 'hide';
@@ -276,12 +477,39 @@ test('platform links reject unrelated shops, invalid URLs and deceptive hosts', 
     assert.equal(itemLinksApi.identifyItem('https://neokyo.com/en/product/yahoo/m42470092884').marketplace, 'yahoo');
 });
 
-test('platform panel metadata includes update URLs and does not request storage or network grants', () => {
+test('platform panel metadata includes update URLs and does not request network grants', () => {
     new vm.Script(itemLinksSource);
-    assert.ok(itemLinksSource.includes('// @grant        none'));
+    const grants = [...itemLinksSource.matchAll(/^\/\/ @grant\s+(\S+)/gm)].map(match => match[1]);
+    assert.deepEqual(grants, ['GM_getValue', 'GM_setValue']);
     assert.ok(itemLinksSource.includes('// @icon         https://buyee.jp/favicon.ico'));
     assert.ok(itemLinksSource.includes('https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Platform-Item-Links.user.js'));
-    assert.equal(/\b(?:fetch|GM_xmlhttpRequest|GM_setValue|GM_getValue)\s*\(/.test(itemLinksSource), false);
+    assert.equal(/\b(?:fetch|GM_xmlhttpRequest)\s*\(/.test(itemLinksSource), false);
+    assert.deepEqual([...itemLinksSource.matchAll(/GM_(?:get|set)Value\((\w+)/g)].map(match => match[1]).filter(key => key !== 'PANEL_SIDE_KEY'), []);
+});
+
+test('platform panel starts lower-left and remembers a move to the right', () => {
+    const store = {};
+    const render = () => {
+        const body = fakeElement('body');
+        const context = {
+            URL,
+            location: new URL('https://neokyo.com/en/product/mercari/m42470092884'),
+            GM_getValue: (key, fallback) => store[key] ?? fallback,
+            GM_setValue: (key, value) => { store[key] = value; },
+            document: { body, createElement: fakeElement, getElementById: () => null }
+        };
+        vm.runInNewContext(itemLinksSource, context);
+        return body.children[0];
+    };
+    const host = render();
+    assert.equal(host.style.left, '12px');
+    const move = findByAction(host, 'move-panel');
+    assert.equal(move.textContent, 'Move panel right');
+    move.listeners.click();
+    assert.equal(host.style.left, '');
+    assert.equal(host.style.right, '12px');
+    assert.equal(move.textContent, 'Move panel left');
+    assert.equal(render().style.right, '12px');
 });
 
 test('platform button icons precede labels and use the matching site favicon URL', () => {

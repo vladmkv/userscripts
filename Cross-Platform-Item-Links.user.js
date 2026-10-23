@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Platform Item Links
 // @namespace    http://tampermonkey.net
-// @version      1.5
+// @version      1.6
 // @description  Open the same auction, Mercari or Flea Market item on another proxy platform.
 // @icon         https://buyee.jp/favicon.ico
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Platform-Item-Links.user.js
@@ -14,13 +14,15 @@
 // @match        https://neokyo.com/en/product/yahoo/*
 // @match        https://neokyo.com/en/product/mercari/*
 // @match        https://neokyo.com/en/product/yahooFleaMarket/*
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // ==/UserScript==
 
 (function() {
     'use strict';
 
     const PANEL_ID = 'cross-platform-item-links';
+    const PANEL_SIDE_KEY = 'item_links_panel_side';
     const MARKETS = { yahoo: 'JDirectItems Auction', mercari: 'Mercari', flea: 'JDirectItems Flea Market' };
     const FAVICONS = {
         Buyee: 'https://buyee.jp/favicon.ico',
@@ -101,12 +103,19 @@
         ];
     }
 
+    function applyPanelSide(host, move) {
+        const side = GM_getValue(PANEL_SIDE_KEY, 'left') === 'right' ? 'right' : 'left';
+        host.style.left = side === 'left' ? '12px' : '';
+        host.style.right = side === 'right' ? '12px' : '';
+        move.textContent = side === 'left' ? 'Move panel right' : 'Move panel left';
+    }
+
     function renderPanel(href = location.href) {
         const item = identifyItem(href);
         if (!item || document.getElementById(PANEL_ID)) return;
         const host = document.createElement('div');
         host.id = PANEL_ID;
-        host.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:2147483646;max-width:calc(100vw - 24px);';
+        host.style.cssText = 'position:fixed;bottom:12px;z-index:2147483646;max-width:calc(100vw - 24px);';
         const root = host.attachShadow({ mode: 'open' });
         const style = document.createElement('style');
         style.textContent = `
@@ -120,6 +129,8 @@
             a:focus-visible, button:focus-visible { outline: 2px solid #14652c; outline-offset: 2px; }
             a[aria-current] { border-color: #14652c; }
             button:disabled { color: #666; background: #eee; cursor: not-allowed; }
+            .move { justify-content: center; margin-top: 6px; cursor: pointer; }
+            .move:hover { background: #e5f3e8; }
         `;
         const nav = document.createElement('nav');
         nav.setAttribute('aria-label', 'Open item on another platform');
@@ -146,7 +157,16 @@
             if (destination.site === item.site) anchor.setAttribute('aria-current', 'page');
             links.append(anchor);
         }
-        nav.append(label, links);
+        const move = document.createElement('button');
+        move.type = 'button';
+        move.className = 'move';
+        move.setAttribute('data-action', 'move-panel');
+        move.addEventListener('click', () => {
+            GM_setValue(PANEL_SIDE_KEY, GM_getValue(PANEL_SIDE_KEY, 'left') === 'right' ? 'left' : 'right');
+            applyPanelSide(host, move);
+        });
+        applyPanelSide(host, move);
+        nav.append(label, links, move);
         root.append(style, nav);
         document.body.append(host);
     }
