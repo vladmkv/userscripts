@@ -42,6 +42,64 @@ test('category URLs preserve filters, clear descendants and control pagination',
     assert.equal(api.isYahooSearch(new URL('https://other.example/en/search/yahoo')), false);
 });
 
+function createCategoryApi(store, fetchImpl) {
+    const context = {
+        URL,
+        Date,
+        location: new URL('https://neokyo.com/en/search/yahoo'),
+        GM_getValue: (key, fallback) => store[key] ?? fallback,
+        GM_setValue: (key, value) => { store[key] = value; },
+        fetch: fetchImpl
+    };
+    vm.createContext(context);
+    vm.runInContext(selector.replace('    start();', '    globalThis.api = { getChildren };'), context);
+    return context.api;
+}
+
+test('category API responses persist across page sessions', async () => {
+    const store = {};
+    let requests = 0;
+    const rows = [{ provider_category_ref: '23632', translation: 'Home appliances', has_children: 1 }];
+    const fetchImpl = async () => {
+        requests++;
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ level_2: rows }) };
+    };
+    const firstPageApi = createCategoryApi(store, fetchImpl);
+    assert.equal(JSON.stringify(await firstPageApi.getChildren(2, 1)), JSON.stringify(rows));
+    const nextPageApi = createCategoryApi(store, fetchImpl);
+    assert.equal(JSON.stringify(await nextPageApi.getChildren(2, 1)), JSON.stringify(rows));
+    assert.equal(requests, 1);
+});
+
+test('category API 429 honors Retry-After and does not retry during cooldown', async () => {
+    const store = {};
+    let requests = 0;
+    const api = createCategoryApi(store, async () => {
+        requests++;
+        return { ok: false, status: 429, headers: { get: name => name === 'Retry-After' ? '120' : null } };
+    });
+    await assert.rejects(api.getChildren(2, 1), /rate-limited \(HTTP 429\)/);
+    assert.ok(store.neokyo_yahoo_category_retry_after >= Date.now() + 119000);
+    const cooledApi = createCategoryApi(store, async () => {
+        requests++;
+        throw new Error('Should not make another request during the cooldown');
+    });
+    await assert.rejects(cooledApi.getChildren(2, 1), /Try again in about 2 min/);
+    assert.equal(requests, 1);
+});
+
+test('stale category cache remains usable during a 429 cooldown', async () => {
+    const rows = [{ provider_category_ref: '23632', translation: 'Home appliances', has_children: 1 }];
+    const store = {
+        neokyo_yahoo_category_cache_v1: { '2:1': { savedAt: 1, rows } },
+        neokyo_yahoo_category_retry_after: Date.now() + 60000
+    };
+    const api = createCategoryApi(store, async () => {
+        throw new Error('Cached data should avoid the request');
+    });
+    assert.equal(JSON.stringify(await api.getChildren(2, 1)), JSON.stringify(rows));
+});
+
 function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBottom = false) {
     const location = new URL(pageUrl);
     const id = location.hostname === 'zenmarket.jp'

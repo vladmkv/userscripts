@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Neokyo Yahoo Category Selector
 // @namespace    http://tampermonkey.net
-// @version      1.1
+// @version      1.3
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Neokyo-Category-Selector.user.js
 // @downloadURL  https://raw.githubusercontent.com/vladmkv/userscripts/main/Neokyo-Category-Selector.user.js
 // @description  Hierarchical Yahoo categories and an optional category lock for Neokyo searches.
@@ -14,7 +14,11 @@
     'use strict';
 
     const SETTINGS_KEY = 'neokyo_yahoo_category_selector';
+    const CATEGORY_CACHE_KEY = 'neokyo_yahoo_category_cache_v1';
+    const CATEGORY_RETRY_AFTER_KEY = 'neokyo_yahoo_category_retry_after';
     const DEFAULT_PATH = ['0', '23632', '23764', '23848', '44762'];
+    const CATEGORY_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+    const DEFAULT_RATE_LIMIT_DELAY_MS = 15 * 60 * 1000;
     const categoryCache = new Map();
     let settings;
     let selectedPath;
@@ -80,15 +84,56 @@
 
     async function getChildren(level, parentId) {
         const key = `${level}:${parentId}`;
-        if (!categoryCache.has(key)) {
-            const response = await fetch(`/api/v1/categories/yahoo/children?level=${level}&category_id=${parentId}`);
-            if (!response.ok) throw new Error(`Category request failed: HTTP ${response.status}`);
-            const data = await response.json();
-            const rows = data[`level_${level}`];
-            if (!Array.isArray(rows)) throw new Error('Unexpected category response');
-            categoryCache.set(key, rows);
+        if (categoryCache.has(key)) return categoryCache.get(key);
+
+        const persistentCache = GM_getValue(CATEGORY_CACHE_KEY, {});
+        const entry = persistentCache && typeof persistentCache === 'object' ? persistentCache[key] : null;
+        const hasCachedRows = Array.isArray(entry?.rows);
+        const cacheIsFresh = hasCachedRows && Date.now() - entry.savedAt < CATEGORY_CACHE_TTL_MS;
+        if (cacheIsFresh) {
+            categoryCache.set(key, entry.rows);
+            return entry.rows;
         }
-        return categoryCache.get(key);
+
+        const retryAfter = Number(GM_getValue(CATEGORY_RETRY_AFTER_KEY, 0));
+        if (retryAfter > Date.now()) {
+            if (hasCachedRows) {
+                categoryCache.set(key, entry.rows);
+                return entry.rows;
+            }
+            const minutes = Math.ceil((retryAfter - Date.now()) / 60000);
+            throw new Error(`Neokyo category API is rate-limited. Try again in about ${minutes} min.`);
+        }
+
+        const response = await fetch(`/api/v1/categories/yahoo/children?level=${level}&category_id=${parentId}`);
+        if (response.status === 429) {
+            const header = response.headers?.get('Retry-After');
+            const seconds = Number(header);
+            const parsedDate = header && !Number.isFinite(seconds) ? Date.parse(header) : NaN;
+            const requestedDelay = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000
+                : Number.isFinite(parsedDate) ? parsedDate - Date.now()
+                    : DEFAULT_RATE_LIMIT_DELAY_MS;
+            GM_setValue(CATEGORY_RETRY_AFTER_KEY, Date.now() + Math.max(60000, requestedDelay));
+            if (hasCachedRows) {
+                categoryCache.set(key, entry.rows);
+                console.warn('Neokyo category API returned 429; using cached category data.');
+                return entry.rows;
+            }
+            throw new Error('Neokyo category API is rate-limited (HTTP 429). Try again later.');
+        }
+        if (!response.ok) throw new Error(`Category request failed: HTTP ${response.status}`);
+        const data = await response.json();
+        const rows = data[`level_${level}`];
+        if (!Array.isArray(rows)) throw new Error('Unexpected category response');
+
+        const nextCache = persistentCache && typeof persistentCache === 'object' && !Array.isArray(persistentCache)
+            ? { ...persistentCache }
+            : {};
+        nextCache[key] = { savedAt: Date.now(), rows };
+        GM_setValue(CATEGORY_CACHE_KEY, nextCache);
+        GM_setValue(CATEGORY_RETRY_AFTER_KEY, 0);
+        categoryCache.set(key, rows);
+        return rows;
     }
 
     function labelText(text) {

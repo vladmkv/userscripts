@@ -48,8 +48,10 @@ stored in this repository.
 
 Adds cascading Yahoo Auction category dropdowns, initially set to portable cassette
 players with the category lock off. Category choices come from Neokyo's category
-API and are cached for the current page. Use Apply category to navigate while
-preserving other URL filters and returning to page 1.
+API and are cached in Tampermonkey storage for 30 days, avoiding repeat requests
+on reload. HTTP 429 responses honor `Retry-After` (15-minute cooldown if absent);
+stale cached categories remain available during cooldown. Use Apply category to
+navigate while preserving other URL filters and returning to page 1.
 
 Lock category retains the selected category across search forms, pagination links,
 and subsequent page loads. Pagination is preserved when correcting dropped
