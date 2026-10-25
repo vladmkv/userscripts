@@ -152,6 +152,10 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
         removeItem(key) { delete this[key]; }
     };
     let tick;
+    const timers = [];
+    const windowListeners = {};
+    let reloads = 0;
+    location.reload = () => { reloads++; };
     const writes = [];
     const errors = [];
     const blobs = [];
@@ -184,9 +188,14 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
                 return [];
             }
         },
-        window: { innerHeight: 900, scrollY: 0, pageYOffset: 0, addEventListener() {}, dispatchEvent() {}, confirm: options.confirm, alert: options.alert },
+        window: {
+            innerHeight: 900, scrollY: 0, pageYOffset: 0,
+            addEventListener(type, listener) { (windowListeners[type] ||= []).push(listener); },
+            dispatchEvent() {}, confirm: options.confirm, alert: options.alert
+        },
         CustomEvent: class {},
-        setTimeout() {},
+        setTimeout: (callback, ms) => timers.push({ callback, ms }),
+        clearTimeout: id => { if (id) timers[id - 1] = null; },
         setInterval: callback => { tick = callback; }
     };
     if (options.now) context.Date = class extends Date { static now() { return options.now(); } };
@@ -199,7 +208,10 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
         input.files = [{ size: text.length, text: async () => text }];
         await input.listeners.change();
     };
-    return { card, wrapper, storage, legacyLocalStorage, id, tick, document: context.document, body, writes, errors, blobs, restore };
+    return {
+        card, wrapper, storage, legacyLocalStorage, id, tick, document: context.document, body, writes, errors, blobs, restore,
+        timers, windowListeners, reloads: () => reloads
+    };
 }
 
 for (const marketplace of ['yahoo', 'mercari', 'yahooFleaMarket']) {
@@ -425,6 +437,73 @@ test('late shared-storage updates do not hide or frame cards in this visit', () 
     result.tick();
     assert.equal(result.wrapper.style.display, undefined);
     assert.equal(result.card.style.border, undefined);
+});
+
+function pendingTimers(result, name) {
+    return result.timers.filter(timer => timer?.callback.name === name);
+}
+
+function fireTimer(result, name) {
+    const [timer] = pendingTimers(result, name);
+    result.timers[result.timers.indexOf(timer)] = null;
+    timer.callback();
+}
+
+test('unseen items cycle a two-color alarm emoji in the tab title until all are seen', () => {
+    const result = scan('https://neokyo.com/en/search/mercari', 'https://neokyo.com/en/product/mercari/m42470092884', false);
+    assert.equal(result.document.title, '\u{1F534} (1) Item results');
+    const [blink] = pendingTimers(result, 'blink');
+    assert.ok(blink.ms >= 300 && blink.ms <= 1000);
+    fireTimer(result, 'blink');
+    assert.equal(result.document.title, '\u{1F535} (1) Item results');
+    fireTimer(result, 'blink');
+    assert.equal(result.document.title, '\u{1F534} (1) Item results');
+    assert.equal(pendingTimers(result, 'blink').length, 1);
+    result.tick();
+    assert.equal(pendingTimers(result, 'blink').length, 1);
+
+    result.card.getBoundingClientRect = () => ({ top: -200, bottom: -10 });
+    result.tick();
+    assert.equal(result.document.title, 'Item results');
+    assert.equal(pendingTimers(result, 'blink').length, 0);
+});
+
+test('seen items and detail pages do not blink the tab title', () => {
+    assert.equal(scan('https://neokyo.com/en/search/mercari', 'https://neokyo.com/en/product/mercari/m42470092884', true).document.title, 'Item results');
+    const item = 'https://zenmarket.jp/product.aspx?itemCode=x1248934501';
+    assert.equal(scan(item, item, false).document.title, 'Item results');
+});
+
+test('search pages reload after 5-10 min and postpone one minute after a recent scroll', () => {
+    let now = 1000000;
+    const result = scan('https://neokyo.com/en/search/mercari', 'https://neokyo.com/en/product/mercari/m42470092884', true, false, undefined, false, { now: () => now });
+    const [first] = pendingTimers(result, 'tryAutoReload');
+    assert.ok(first.ms >= 300000 && first.ms <= 600000);
+
+    result.windowListeners.scroll.forEach(listener => listener());
+    now += 10000;
+    fireTimer(result, 'tryAutoReload');
+    assert.equal(result.reloads(), 0);
+    assert.equal(pendingTimers(result, 'tryAutoReload')[0].ms, 60000);
+
+    now += 60000;
+    fireTimer(result, 'tryAutoReload');
+    assert.equal(result.reloads(), 1);
+});
+
+test('auto-reload waits while seen items are not saved', () => {
+    const result = scan('https://neokyo.com/en/search/mercari', 'https://neokyo.com/en/product/mercari/m42470092884', false, true, undefined, false, {
+        allowErrors: true,
+        setValue() {}
+    });
+    fireTimer(result, 'tryAutoReload');
+    assert.equal(result.reloads(), 0);
+    assert.equal(pendingTimers(result, 'tryAutoReload')[0].ms, 60000);
+});
+
+test('detail pages do not schedule auto-reload', () => {
+    const item = 'https://zenmarket.jp/product.aspx?itemCode=x1248934501';
+    assert.equal(pendingTimers(scan(item, item, false), 'tryAutoReload').length, 0);
 });
 
 const itemLinksSource = fs.readFileSync(path.join(root, 'Cross-Platform-Item-Links.user.js'), 'utf8');

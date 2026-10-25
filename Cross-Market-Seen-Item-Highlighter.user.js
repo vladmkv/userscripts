@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Market Seen Item Highlighter
 // @namespace    http://tampermonkey.net
-// @version      7.23
+// @version      7.24
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
 // @downloadURL  https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
 // @description  Tracks seen item IDs across Buyee, ZenMarket, and Neokyo search feeds.
@@ -33,6 +33,13 @@
     const PANEL_SIDE_KEY = 'seen_item_panel_side';
     const BACKUP_FORMAT = 'cross-market-seen-items-backup';
     const MAX_BACKUP_BYTES = 20 * 1024 * 1024;
+    const RELOAD_MIN_MS = 5 * 60000;
+    const RELOAD_MAX_MS = 10 * 60000;
+    const RELOAD_POSTPONE_MS = 60000;
+    const RECENT_SCROLL_MS = 30000;
+    const BLINK_MIN_MS = 300;
+    const BLINK_MAX_MS = 1000;
+    const ALARM_EMOJIS = ['\u{1F534}', '\u{1F535}'];
 
     function isBuyeeSite() {
         return location.hostname === 'buyee.jp' || location.hostname.endsWith('.buyee.jp');
@@ -54,6 +61,15 @@
 
     function isZenMarketItemPage() {
         return isZenMarketSite() && ['/product.aspx', '/auction.aspx'].includes(location.pathname.toLowerCase());
+    }
+
+    function isSearchPage() {
+        return isZenMarketSearch() || isNeokyoSearch()
+            || (isBuyeeSite() && /^\/(?:item|mercari)\/search(?:\/|$)/.test(location.pathname));
+    }
+
+    function randomBetween(min, max) {
+        return min + Math.random() * (max - min);
     }
 
     function loadRegistry() {
@@ -111,6 +127,62 @@
     let neokyoProcessEntryReported = false;
     const neokyoDiagnosticStartedAt = Date.now();
     let lastScanError = '';
+    let lastScrollAt = 0;
+
+    // Tab-title alarm; callers only report how many unseen cards remain on the page.
+    const newItemAlarm = (() => {
+        let active = false;
+        let phase = 0;
+        let count = 0;
+        let baseTitle = '';
+        let blinkTimer = null;
+
+        function render() {
+            document.title = `${ALARM_EMOJIS[phase]} (${count}) ${baseTitle}`;
+        }
+
+        function blink() {
+            render();
+            phase = (phase + 1) % ALARM_EMOJIS.length;
+            blinkTimer = setTimeout(blink, randomBetween(BLINK_MIN_MS, BLINK_MAX_MS));
+        }
+
+        function start() {
+            active = true;
+            baseTitle = document.title;
+            phase = 0;
+            blink();
+        }
+
+        function stop() {
+            active = false;
+            clearTimeout(blinkTimer);
+            blinkTimer = null;
+            document.title = baseTitle;
+        }
+
+        return {
+            update(unseenCount) {
+                count = unseenCount;
+                if (count > 0 && !active) start();
+                else if (count === 0 && active) stop();
+            }
+        };
+    })();
+
+    function scheduleAutoReload(delay) {
+        setTimeout(tryAutoReload, delay);
+    }
+
+    // Waits while the user is scrolling or seen items are not yet saved, so no marks are lost.
+    function tryAutoReload() {
+        flushPendingWrites();
+        if (pendingWrites.size > 0 || Date.now() - lastScrollAt < RECENT_SCROLL_MS) {
+            scheduleAutoReload(RELOAD_POSTPONE_MS);
+            return;
+        }
+        location.reload();
+    }
 
     if (isNeokyoSearch()) {
         console.info(`[Cross-Market Seen Item Highlighter] Neokyo userscript active on ${location.pathname}; shared registry has ${Object.keys(itemRegistry).length} records.`);
@@ -425,8 +497,7 @@
         }
 
         if (processZenMarketItemPage()) return;
-        if (!isZenMarketSearch() && !isNeokyoSearch()
-            && !(isBuyeeSite() && /^\/(?:item|mercari)\/search(?:\/|$)/.test(location.pathname))) return;
+        if (!isSearchPage()) return;
 
         ensurePanel();
         const cards = getTargetListingCards();
@@ -445,6 +516,7 @@
             neokyoCardDiagnosticReported = true;
         }
 
+        let unseenCount = 0;
         cards.forEach(card => {
             const linkSelector = isNeokyoSearch() ? 'a[href*="/en/product/"]' : 'a[href*="/item/"]';
             const link = card.tagName === 'A' ? card : card.querySelector(linkSelector);
@@ -478,9 +550,12 @@
                 paintSeenItem(card);
                 window.dispatchEvent(new CustomEvent('buyeeItemSeen', { detail: { id: itemId } }));
                 console.log(itemId + " added as hidden");
+            } else {
+                unseenCount++;
             }
         });
 
+        newItemAlarm.update(unseenCount);
         flushPendingWrites();
         updatePanel();
     }
@@ -500,6 +575,8 @@
 
     setTimeout(runStateEngineSafely, 300);
     setTimeout(runStateEngineSafely, 800);
+    window.addEventListener('scroll', () => { lastScrollAt = Date.now(); });
     window.addEventListener('scroll', runStateEngineSafely);
     setInterval(runStateEngineSafely, 1500);
+    if (isSearchPage()) scheduleAutoReload(randomBetween(RELOAD_MIN_MS, RELOAD_MAX_MS));
 })();
