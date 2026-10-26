@@ -508,14 +508,32 @@
     function processBuyeeItemRecommendations() {
         if (!isBuyeeItemPage()) return false;
 
+        const userReachedBottom = isAtPageBottom();
+        const currentItemId = getItemId(location.href);
         const cards = document.querySelectorAll('.recommendItem__list .recommendItem__items');
         cards.forEach(card => {
             const itemId = getBuyeeRecommendationItemId(card);
             if (!itemId) return;
-            if (seenAtPageLoad.has(itemId)) {
+            if (seenAtPageLoad.has(itemId) || seenThisVisit.has(itemId)) {
+                paintSeenItem(card);
+                return;
+            }
+
+            if (itemRegistry[itemId] === 'hide') return;
+            if (itemId === currentItemId) return;
+
+            const position = card.getBoundingClientRect();
+            const hasCompletelyLeftScreen = position.bottom < 0;
+            const visibleAtBottomSweep = userReachedBottom && position.top < window.innerHeight;
+
+            if (hasCompletelyLeftScreen || visibleAtBottomSweep) {
+                markSeen(itemId);
+                seenThisVisit.add(itemId);
                 paintSeenItem(card);
             }
         });
+
+        flushPendingWrites();
 
         return true;
     }
@@ -560,7 +578,6 @@
             if (!link) return;
 
             const href = link.href || "";
-            const isMercari = isBuyeeSite() && href.includes("mercari");
             const itemId = getItemId(href);
 
             if (!itemId) return;
@@ -578,7 +595,7 @@
             if (itemRegistry[itemId] === 'hide') return;
 
             const position = card.getBoundingClientRect();
-            const hasCompletelyLeftScreen = isMercari ? false : (position.bottom < 0);
+            const hasCompletelyLeftScreen = (position.bottom < 0);
             const visibleAtBottomSweep = (userReachedBottom && position.top < window.innerHeight);
 
             if (hasCompletelyLeftScreen || visibleAtBottomSweep) {

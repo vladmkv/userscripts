@@ -216,7 +216,7 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
     };
 }
 
-function createRecommendationCard(pageUrl, hrefEntries) {
+function createRecommendationCard(pageUrl, hrefEntries, bounds = { top: 100, bottom: 300 }) {
     const anchors = hrefEntries.map(entry => {
         const hasHref = !(entry && typeof entry === 'object' && entry.hasHref === false) && entry !== null && entry !== undefined;
         const rawHref = entry && typeof entry === 'object' ? entry.href : entry;
@@ -231,6 +231,9 @@ function createRecommendationCard(pageUrl, hrefEntries) {
 
     return {
         style: {},
+        getBoundingClientRect() {
+            return typeof bounds === 'function' ? bounds() : bounds;
+        },
         querySelectorAll(query) {
             if (query !== 'a[href]') return [];
             return anchors.filter(anchor => anchor.getAttribute('href') !== null);
@@ -238,13 +241,16 @@ function createRecommendationCard(pageUrl, hrefEntries) {
     };
 }
 
-function scanBuyeeDetailRecommendations(pageUrl, cards, existingStorage) {
+function scanBuyeeDetailRecommendations(pageUrl, cards, existingStorage, options = {}) {
     const location = new URL(pageUrl);
     const storage = existingStorage || {
         buyee_item_registry: {},
         buyee_item_registry_migrated_origins: [location.origin],
         buyee_item_registry_legacy_cleanup_origins: [location.origin]
     };
+    const innerHeight = options.innerHeight ?? 900;
+    const scrollHeight = options.scrollHeight ?? 5000;
+    const scrollY = options.scrollY ?? (options.atBottom ? Math.max(scrollHeight - innerHeight + 20, 0) : 0);
     const body = fakeElement('body');
     body.innerText = 'Product information';
     const writes = [];
@@ -272,13 +278,13 @@ function scanBuyeeDetailRecommendations(pageUrl, cards, existingStorage) {
             title: 'Item results',
             body,
             createElement: fakeElement,
-            documentElement: { scrollHeight: 5000 },
+            documentElement: { scrollHeight },
             querySelectorAll: query => query === '.recommendItem__list .recommendItem__items' ? cards : []
         },
         window: {
-            innerHeight: 900,
-            scrollY: 0,
-            pageYOffset: 0,
+            innerHeight,
+            scrollY,
+            pageYOffset: scrollY,
             addEventListener(type, listener) { (windowListeners[type] ||= []).push(listener); },
             dispatchEvent(event) { events.push(event); }
         },
@@ -371,7 +377,12 @@ for (const marketplace of ['item', 'mercari']) {
 
 test('Buyee Mercari still requires a bottom sweep to mark unseen cards', () => {
     const result = scan('https://buyee.jp/mercari/search', 'https://buyee.jp/mercari/item/m42470092884', false, true);
-    assert.equal(result.storage.buyee_item_registry[result.id], undefined);
+    assert.equal(result.storage.buyee_item_registry[result.id], 'hide');
+});
+
+test('Buyee Mercari bottom sweep marks visible unseen cards', () => {
+    const result = scan('https://buyee.jp/mercari/search', 'https://buyee.jp/mercari/item/m42470092884', false, false, undefined, true);
+    assert.equal(result.storage.buyee_item_registry[result.id], 'hide');
 });
 
 test('Buyee detail pages do not hide cards or paint frames', () => {
@@ -450,8 +461,9 @@ test('Buyee detail recommendations do not react to late shared-storage updates u
     assert.equal(afterReload.events.length, 0);
 });
 
-test('Buyee detail recommendations pick up delayed cards on repeated scans without marking seen items', () => {
+test('Buyee detail recommendations mark unseen cards only after scroll-past and keep writes idempotent', () => {
     const pageUrl = 'https://buyee.jp/item/jdirectitems/auction/x1248934501';
+    let delayedPosition = { top: 920, bottom: 1080 };
     const cards = [];
     const storage = {
         buyee_item_registry: { delayedSeen: 'hide' },
@@ -461,17 +473,46 @@ test('Buyee detail recommendations pick up delayed cards on repeated scans witho
 
     const result = scanBuyeeDetailRecommendations(pageUrl, cards, storage);
     cards.push(createRecommendationCard(pageUrl, ['/mercari/item/delayedSeen']));
-    cards.push(createRecommendationCard(pageUrl, ['/mercari/item/delayedUnseen']));
+    cards.push(createRecommendationCard(pageUrl, ['/mercari/item/delayedUnseen'], () => delayedPosition));
 
     result.tick();
     assert.equal(cards[0].style.border, '4px dashed #e74c3c');
     assert.equal(cards[1].style.border, undefined);
+    assert.equal(storage.buyee_item_registry.delayedUnseen, undefined);
 
+    delayedPosition = { top: -220, bottom: -10 };
     result.windowListeners.scroll.forEach(listener => listener());
-    assert.equal(cards[0].style.border, '4px dashed #e74c3c');
-    assert.equal(cards[1].style.border, undefined);
-    assert.deepEqual(result.writes, []);
+    assert.equal(cards[1].style.border, '4px dashed #e74c3c');
+    assert.equal(storage.buyee_item_registry.delayedUnseen, 'hide');
+    assert.equal(cards[1].style.display, undefined);
     assert.equal(result.events.length, 0);
+
+    const writesAfterFirstMark = result.writes.filter(key => key === 'buyee_item_registry').length;
+    result.tick();
+    result.windowListeners.scroll.forEach(listener => listener());
+    assert.equal(result.writes.filter(key => key === 'buyee_item_registry').length, writesAfterFirstMark);
+});
+
+test('Buyee detail recommendations mark visible unseen cards during bottom sweep', () => {
+    const pageUrl = 'https://buyee.jp/paypayfleamarket/item/z708672664';
+    const cards = [createRecommendationCard(pageUrl, ['/mercari/item/mBottomSweep'])];
+    const storage = {
+        buyee_item_registry: {},
+        buyee_item_registry_migrated_origins: ['https://buyee.jp'],
+        buyee_item_registry_legacy_cleanup_origins: ['https://buyee.jp']
+    };
+
+    const result = scanBuyeeDetailRecommendations(pageUrl, cards, storage, { atBottom: true });
+
+    assert.equal(storage.buyee_item_registry.mBottomSweep, 'hide');
+    assert.equal(cards[0].style.border, '4px dashed #e74c3c');
+    assert.equal(cards[0].style.display, undefined);
+    assert.equal(result.events.length, 0);
+    assert.equal(result.writes.includes('buyee_item_registry'), true);
+
+    const writesAfterFirstMark = result.writes.filter(key => key === 'buyee_item_registry').length;
+    result.tick();
+    assert.equal(result.writes.filter(key => key === 'buyee_item_registry').length, writesAfterFirstMark);
 });
 
 test('legacy Buyee localStorage is removed only after migration and shared data is kept', () => {
