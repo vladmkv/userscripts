@@ -20,6 +20,7 @@ test('both scripts retain identity, parse, and publish stable auto-update URLs',
         assert.ok(source.includes('// @namespace    http://tampermonkey.net'));
     }
     assert.ok(highlighter.includes('// @name         Cross-Market Seen Item Highlighter'));
+    assert.ok(highlighter.includes('// @match        *://*.buyee.jp/mercari/item/*'));
 });
 
 test('category URLs preserve filters, clear descendants and control pagination', () => {
@@ -154,6 +155,7 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
     let tick;
     const timers = [];
     const windowListeners = {};
+    const events = [];
     let reloads = 0;
     location.reload = () => { reloads++; };
     const writes = [];
@@ -191,7 +193,7 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
         window: {
             innerHeight: 900, scrollY: 0, pageYOffset: 0,
             addEventListener(type, listener) { (windowListeners[type] ||= []).push(listener); },
-            dispatchEvent() {}, confirm: options.confirm, alert: options.alert
+            dispatchEvent(event) { events.push(event); }, confirm: options.confirm, alert: options.alert
         },
         CustomEvent: class {},
         setTimeout: (callback, ms) => timers.push({ callback, ms }),
@@ -209,8 +211,101 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
         await input.listeners.change();
     };
     return {
-        card, wrapper, storage, legacyLocalStorage, id, tick, document: context.document, body, writes, errors, blobs, restore,
+        card, wrapper, storage, legacyLocalStorage, id, tick, document: context.document, body, writes, errors, events, blobs, restore,
         timers, windowListeners, reloads: () => reloads
+    };
+}
+
+function createRecommendationCard(pageUrl, hrefEntries) {
+    const anchors = hrefEntries.map(entry => {
+        const hasHref = !(entry && typeof entry === 'object' && entry.hasHref === false) && entry !== null && entry !== undefined;
+        const rawHref = entry && typeof entry === 'object' ? entry.href : entry;
+        return {
+            href: hasHref && rawHref ? new URL(rawHref, pageUrl).href : '',
+            getAttribute(name) {
+                if (name !== 'href' || !hasHref) return null;
+                return rawHref ?? '';
+            }
+        };
+    });
+
+    return {
+        style: {},
+        querySelectorAll(query) {
+            if (query !== 'a[href]') return [];
+            return anchors.filter(anchor => anchor.getAttribute('href') !== null);
+        }
+    };
+}
+
+function scanBuyeeDetailRecommendations(pageUrl, cards, existingStorage) {
+    const location = new URL(pageUrl);
+    const storage = existingStorage || {
+        buyee_item_registry: {},
+        buyee_item_registry_migrated_origins: [location.origin],
+        buyee_item_registry_legacy_cleanup_origins: [location.origin]
+    };
+    const body = fakeElement('body');
+    body.innerText = 'Product information';
+    const writes = [];
+    const timers = [];
+    const events = [];
+    const windowListeners = {};
+    let tick;
+
+    const context = {
+        URL,
+        Blob,
+        location,
+        console: { info() {}, log() {}, warn() {}, error(error) { throw error; } },
+        GM_getValue: (key, fallback) => structuredClone(storage[key] ?? fallback),
+        GM_setValue: (key, value) => {
+            writes.push(key);
+            storage[key] = structuredClone(value);
+        },
+        unsafeWindow: {
+            localStorage: {
+                removeItem() {}
+            }
+        },
+        document: {
+            title: 'Item results',
+            body,
+            createElement: fakeElement,
+            documentElement: { scrollHeight: 5000 },
+            querySelectorAll: query => query === '.recommendItem__list .recommendItem__items' ? cards : []
+        },
+        window: {
+            innerHeight: 900,
+            scrollY: 0,
+            pageYOffset: 0,
+            addEventListener(type, listener) { (windowListeners[type] ||= []).push(listener); },
+            dispatchEvent(event) { events.push(event); }
+        },
+        CustomEvent: class {
+            constructor(type, init = {}) {
+                this.type = type;
+                this.detail = init.detail;
+            }
+        },
+        setTimeout: (callback, ms) => timers.push({ callback, ms }),
+        clearTimeout: id => { if (id) timers[id - 1] = null; },
+        setInterval: callback => { tick = callback; }
+    };
+
+    vm.runInNewContext(highlighter, context);
+    tick();
+
+    return {
+        cards,
+        storage,
+        writes,
+        events,
+        timers,
+        body,
+        document: context.document,
+        windowListeners,
+        tick
     };
 }
 
@@ -284,6 +379,99 @@ test('Buyee detail pages do not hide cards or paint frames', () => {
     const result = scan(url, url, true);
     assert.equal(result.card.style.display, undefined);
     assert.equal(result.card.style.border, undefined);
+});
+
+for (const pageUrl of [
+    'https://buyee.jp/item/jdirectitems/auction/x1248934501',
+    'https://buyee.jp/mercari/item/m42470092884',
+    'https://buyee.jp/paypayfleamarket/item/z708672664'
+]) {
+    test(`Buyee detail recommendations frame only already-seen cards: ${pageUrl}`, () => {
+        const cards = [
+            createRecommendationCard(pageUrl, [null, { href: '', hasHref: true }, '/mercari/item/2JYT9KEfHQbS7hkiqhqnLD?conversionType=Mercari_DirectSearch']),
+            createRecommendationCard(pageUrl, ['/paypayfleamarket/item/z708672664?conversionType=jdirectitems_auction_DirectSearch']),
+            createRecommendationCard(pageUrl, ['https://buyee.jp/item/jdirectitems/auction/1248800526?conversionType=mypage_watch_list']),
+            createRecommendationCard(pageUrl, ['https://buyee.jp/item/jdirectitems/auction/x1248934501']),
+            createRecommendationCard(pageUrl, ['/mercari/item/mUnseenItem', '/mercari/item/mUnseenItem']),
+            createRecommendationCard(pageUrl, [null, { href: '', hasHref: true }, '/watch/list', '/help'])
+        ];
+        const storage = {
+            buyee_item_registry: {
+                '2JYT9KEfHQbS7hkiqhqnLD': 'hide',
+                z708672664: 'hide',
+                '1248800526': 'hide',
+                x1248934501: 'hide'
+            },
+            buyee_item_registry_migrated_origins: ['https://buyee.jp'],
+            buyee_item_registry_legacy_cleanup_origins: ['https://buyee.jp']
+        };
+
+        const result = scanBuyeeDetailRecommendations(pageUrl, cards, storage);
+
+        for (const card of cards.slice(0, 4)) {
+            assert.equal(card.style.border, '4px dashed #e74c3c');
+            assert.equal(card.style.backgroundColor, '#fdf2f2');
+            assert.equal(card.style.display, undefined);
+        }
+        for (const card of cards.slice(4)) {
+            assert.equal(card.style.border, undefined);
+            assert.equal(card.style.backgroundColor, undefined);
+            assert.equal(card.style.display, undefined);
+        }
+
+        assert.deepEqual(result.writes, []);
+        assert.equal(result.events.length, 0);
+        assert.equal(result.body.children.length, 0);
+        assert.equal(result.document.title, 'Item results');
+        assert.equal(pendingTimers(result, 'tryAutoReload').length, 0);
+    });
+}
+
+test('Buyee detail recommendations do not react to late shared-storage updates until reload', () => {
+    const pageUrl = 'https://buyee.jp/item/jdirectitems/auction/x1248934501';
+    const cards = [createRecommendationCard(pageUrl, ['/mercari/item/mLateJoin'])];
+    const storage = {
+        buyee_item_registry: {},
+        buyee_item_registry_migrated_origins: ['https://buyee.jp'],
+        buyee_item_registry_legacy_cleanup_origins: ['https://buyee.jp']
+    };
+
+    const firstVisit = scanBuyeeDetailRecommendations(pageUrl, cards, storage);
+    assert.equal(cards[0].style.border, undefined);
+
+    storage.buyee_item_registry.mLateJoin = 'hide';
+    firstVisit.tick();
+    assert.equal(cards[0].style.border, undefined);
+
+    const afterReloadCards = [createRecommendationCard(pageUrl, ['/mercari/item/mLateJoin'])];
+    const afterReload = scanBuyeeDetailRecommendations(pageUrl, afterReloadCards, storage);
+    assert.equal(afterReloadCards[0].style.border, '4px dashed #e74c3c');
+    assert.equal(afterReload.writes.length, 0);
+    assert.equal(afterReload.events.length, 0);
+});
+
+test('Buyee detail recommendations pick up delayed cards on repeated scans without marking seen items', () => {
+    const pageUrl = 'https://buyee.jp/item/jdirectitems/auction/x1248934501';
+    const cards = [];
+    const storage = {
+        buyee_item_registry: { delayedSeen: 'hide' },
+        buyee_item_registry_migrated_origins: ['https://buyee.jp'],
+        buyee_item_registry_legacy_cleanup_origins: ['https://buyee.jp']
+    };
+
+    const result = scanBuyeeDetailRecommendations(pageUrl, cards, storage);
+    cards.push(createRecommendationCard(pageUrl, ['/mercari/item/delayedSeen']));
+    cards.push(createRecommendationCard(pageUrl, ['/mercari/item/delayedUnseen']));
+
+    result.tick();
+    assert.equal(cards[0].style.border, '4px dashed #e74c3c');
+    assert.equal(cards[1].style.border, undefined);
+
+    result.windowListeners.scroll.forEach(listener => listener());
+    assert.equal(cards[0].style.border, '4px dashed #e74c3c');
+    assert.equal(cards[1].style.border, undefined);
+    assert.deepEqual(result.writes, []);
+    assert.equal(result.events.length, 0);
 });
 
 test('legacy Buyee localStorage is removed only after migration and shared data is kept', () => {

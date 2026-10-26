@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Market Seen Item Highlighter
 // @namespace    http://tampermonkey.net
-// @version      7.24
+// @version      7.25
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
 // @downloadURL  https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
 // @description  Tracks seen item IDs across Buyee, ZenMarket, and Neokyo search feeds.
@@ -9,7 +9,7 @@
 // @match        *://*.buyee.jp/item/search*
 // @match        *://*.buyee.jp/mercari/search*
 // @match        *://*.buyee.jp/item/jdirectitems/auction/*
-// @match        *://*.buyee.jp/mercari/item/
+// @match        *://*.buyee.jp/mercari/item/*
 // @match        *://*.buyee.jp/paypayfleamarket/item/*
 // @match        *://zenmarket.jp/en/search.aspx*
 // @match        *://zenmarket.jp/product.aspx*
@@ -61,6 +61,11 @@
 
     function isZenMarketItemPage() {
         return isZenMarketSite() && ['/product.aspx', '/auction.aspx'].includes(location.pathname.toLowerCase());
+    }
+
+    function isBuyeeItemPage() {
+        if (!isBuyeeSite()) return false;
+        return /^\/(?:item\/jdirectitems\/auction|mercari\/item|paypayfleamarket\/item)\/[a-zA-Z0-9_-]+(?:\/|$)/.test(location.pathname);
     }
 
     function isSearchPage() {
@@ -484,6 +489,37 @@
         return true;
     }
 
+    function getBuyeeRecommendationItemId(card) {
+        const links = card.querySelectorAll('a[href]');
+        for (const link of links) {
+            const rawHref = typeof link.getAttribute === 'function' ? link.getAttribute('href') : link.href;
+            if (!rawHref) continue;
+            try {
+                const absoluteHref = new URL(rawHref, location.href).href;
+                const itemId = getItemId(absoluteHref);
+                if (itemId) return itemId;
+            } catch (error) {
+                continue;
+            }
+        }
+        return null;
+    }
+
+    function processBuyeeItemRecommendations() {
+        if (!isBuyeeItemPage()) return false;
+
+        const cards = document.querySelectorAll('.recommendItem__list .recommendItem__items');
+        cards.forEach(card => {
+            const itemId = getBuyeeRecommendationItemId(card);
+            if (!itemId) return;
+            if (seenAtPageLoad.has(itemId)) {
+                paintSeenItem(card);
+            }
+        });
+
+        return true;
+    }
+
     function processStateEngine() {
         if (isNeokyoSearch() && !neokyoProcessEntryReported) {
             console.info(`[Cross-Market Seen Item Highlighter] Neokyo scan callback entered on ${location.pathname}.`);
@@ -497,6 +533,7 @@
         }
 
         if (processZenMarketItemPage()) return;
+        if (processBuyeeItemRecommendations()) return;
         if (!isSearchPage()) return;
 
         ensurePanel();
