@@ -135,6 +135,26 @@
     const neokyoDiagnosticStartedAt = Date.now();
     let lastScanError = '';
     let lastScrollAt = 0;
+    let reloadDueAt = 0;
+    let reloadTimeoutHandle = null;
+    let reloadCountdownInterval = null;
+
+    function formatReloadCountdown(msRemaining) {
+        const totalSeconds = Math.max(0, Math.ceil(msRemaining / 1000));
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+
+    function updateReloadCountdown() {
+        if (!panelElements || !panelElements.countdown) return;
+        if (!reloadDueAt) {
+            panelElements.countdown.textContent = 'Next reload: --:--';
+            return;
+        }
+        const remaining = Math.max(0, reloadDueAt - Date.now());
+        panelElements.countdown.textContent = `Next reload: ${formatReloadCountdown(remaining)}`;
+    }
 
     // Tab-title alarm; callers only report how many unseen cards remain on the page.
     const newItemAlarm = (() => {
@@ -178,7 +198,16 @@
     })();
 
     function scheduleAutoReload(delay) {
-        setTimeout(tryAutoReload, delay);
+        if (reloadTimeoutHandle) {
+            clearTimeout(reloadTimeoutHandle);
+        }
+        if (reloadCountdownInterval) {
+            clearInterval(reloadCountdownInterval);
+        }
+        reloadDueAt = Date.now() + delay;
+        reloadCountdownInterval = setInterval(updateReloadCountdown, 1000);
+        updateReloadCountdown();
+        reloadTimeoutHandle = setTimeout(tryAutoReload, delay);
     }
 
     // Waits while the user is scrolling or seen items are not yet saved, so no marks are lost.
@@ -188,6 +217,15 @@
             scheduleAutoReload(RELOAD_POSTPONE_MS);
             return;
         }
+        if (reloadCountdownInterval) {
+            clearInterval(reloadCountdownInterval);
+            reloadCountdownInterval = null;
+        }
+        if (reloadTimeoutHandle) {
+            clearTimeout(reloadTimeoutHandle);
+            reloadTimeoutHandle = null;
+        }
+        reloadDueAt = 0;
         location.reload();
     }
 
@@ -366,8 +404,8 @@
         const root = host.attachShadow({ mode: 'open' });
         const style = document.createElement('style');
         style.textContent = `
-            section { box-sizing: border-box; display: flex; flex-direction: column; gap: 6px; width: 210px; padding: 10px; border: 1px solid #777; border-radius: 4px; background: #fff; color: #202020; box-shadow: 0 2px 8px #0003; font: 13px/1.4 Verdana, sans-serif; }
-            p { margin: 0; }
+            section { box-sizing: border-box; display: flex; flex-direction: column; gap: 6px; width: 210px; padding: 10px; border: 1px solid #777; border-radius: 4px; background: #fff; color: #202020; font-family: sans-serif; }
+            p { margin: 0; line-height: 1.4; }
             .pending { color: #b00020; }
             button { min-height: 32px; padding: 5px 8px; border: 1px solid #777; border-radius: 3px; background: #f5f5f5; color: #202020; font: inherit; cursor: pointer; }
             button:hover { background: #e5f3e8; }
@@ -379,15 +417,17 @@
         const hidden = document.createElement('p');
         const pending = document.createElement('p');
         pending.className = 'pending';
+        const countdown = document.createElement('p');
         const toggle = createButton('Show hidden items', 'toggle-hidden', toggleHiddenItems);
         const backup = createButton('Back up data', 'backup', downloadBackup);
         const restore = createButton('Restore data', 'restore', chooseBackupFile);
         const move = createButton('Move panel right', 'move-panel', movePanel);
-        panel.append(total, hidden, pending, toggle, backup, restore, move);
+        panel.append(total, hidden, pending, countdown, toggle, backup, restore, move);
         root.append(style, panel);
         document.body.append(host);
-        panelElements = { host, total, hidden, pending, toggle, move };
+        panelElements = { host, total, hidden, pending, countdown, toggle, move };
         applyPanelSide();
+        updateReloadCountdown();
     }
 
     function updatePanel() {
@@ -398,6 +438,7 @@
         panelElements.pending.textContent = `Not yet saved: ${pendingWrites.size}`;
         panelElements.toggle.textContent = showHidden ? 'Hide seen items' : 'Show hidden items';
         panelElements.toggle.setAttribute('aria-pressed', String(showHidden));
+        updateReloadCountdown();
     }
 
     function isAtPageBottom() {
@@ -571,7 +612,7 @@
                 const id = link ? getItemId(link.href) : null;
                 return id && itemRegistry[id] === 'hide';
             }).length;
-            console.info(`[Cross-Market Seen Item Highlighter] Neokyo scan: ${cards.length} cards, ${cardLinks.length} Mercari product links, sample ID ${sampleId || 'none'}, ${previouslySeenCount} already in shared registry.`);
+            console.info(`[Cross-Market Seen Item Highlighter] Neokyo scan: ${cards.length} cards, ${cardLinks.length} Mercari product links, sample ID ${sampleId || 'none'}, ${previouslySeenCount} previously seen.`);
             neokyoCardDiagnosticReported = true;
         }
 
