@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Market Seen Item Highlighter
 // @namespace    http://tampermonkey.net
-// @version      7.26
+// @version      7.28
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
 // @downloadURL  https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
 // @description  Tracks seen item IDs across Buyee, ZenMarket, and Neokyo search feeds.
@@ -119,7 +119,9 @@
     }
 
     let itemRegistry = loadRegistry();
+    // Load-time snapshot: search pages hide these; fixed so cards do not vanish mid-visit.
     const seenAtPageLoad = new Set(Object.keys(itemRegistry).filter(id => itemRegistry[id] === 'hide'));
+    // Marked by this tab: shown framed, never hidden, until reload.
     const seenThisVisit = new Set();
     const pendingWrites = new Set();
     const hiddenElements = new Set();
@@ -198,6 +200,7 @@
         return stored && typeof stored === 'object' && !Array.isArray(stored) ? { ...stored } : {};
     }
 
+    // REVIEW(pruning): behavior at the cap is untested; recheck both callers, the registry refresh in processStateEngine and the detail-page paint check.
     function pruneRegistry(registry) {
         const registryKeys = Object.keys(registry);
         const overflowCount = registryKeys.length - MAX_TRACKED_ITEMS;
@@ -514,12 +517,12 @@
         cards.forEach(card => {
             const itemId = getBuyeeRecommendationItemId(card);
             if (!itemId) return;
-            if (seenAtPageLoad.has(itemId) || seenThisVisit.has(itemId)) {
+            // REVIEW(pruning): the sets and the registry diverge only if IDs are pruned or replaced mid-visit.
+            if (seenAtPageLoad.has(itemId) || seenThisVisit.has(itemId) || itemRegistry[itemId] === 'hide') {
                 paintSeenItem(card);
                 return;
             }
 
-            if (itemRegistry[itemId] === 'hide') return;
             if (itemId === currentItemId) return;
 
             const position = card.getBoundingClientRect();
@@ -546,6 +549,7 @@
 
         const sharedRegistry = GM_getValue(REGISTRY_KEY, itemRegistry);
         if (sharedRegistry && typeof sharedRegistry === 'object' && !Array.isArray(sharedRegistry)) {
+            // REVIEW(pruning): pruned IDs vanish from the live registry here but stay in seenAtPageLoad.
             itemRegistry = sharedRegistry;
             pendingWrites.forEach(id => { itemRegistry[id] = 'hide'; });
         }

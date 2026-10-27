@@ -438,7 +438,7 @@ for (const pageUrl of [
     });
 }
 
-test('Buyee detail recommendations do not react to late shared-storage updates until reload', () => {
+test('Buyee detail recommendations frame IDs saved by another tab after page load without writing', () => {
     const pageUrl = 'https://buyee.jp/item/jdirectitems/auction/x1248934501';
     const cards = [createRecommendationCard(pageUrl, ['/mercari/item/mLateJoin'])];
     const storage = {
@@ -452,7 +452,10 @@ test('Buyee detail recommendations do not react to late shared-storage updates u
 
     storage.buyee_item_registry.mLateJoin = 'hide';
     firstVisit.tick();
-    assert.equal(cards[0].style.border, undefined);
+    assert.equal(cards[0].style.border, '4px dashed #e74c3c');
+    assert.equal(cards[0].style.display, undefined);
+    assert.deepEqual(firstVisit.writes, []);
+    assert.equal(firstVisit.events.length, 0);
 
     const afterReloadCards = [createRecommendationCard(pageUrl, ['/mercari/item/mLateJoin'])];
     const afterReload = scanBuyeeDetailRecommendations(pageUrl, afterReloadCards, storage);
