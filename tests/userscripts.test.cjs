@@ -154,6 +154,7 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
     };
     let tick;
     const timers = [];
+    const intervals = [];
     const windowListeners = {};
     const events = [];
     let reloads = 0;
@@ -198,7 +199,11 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
         CustomEvent: class {},
         setTimeout: (callback, ms) => timers.push({ callback, ms }),
         clearTimeout: id => { if (id) timers[id - 1] = null; },
-        setInterval: callback => { tick = callback; }
+        setInterval: (callback, ms) => {
+            if (!tick) tick = callback;
+            return intervals.push({ callback, ms });
+        },
+        clearInterval: id => { if (id) intervals[id - 1] = null; }
     };
     if (options.now) context.Date = class extends Date { static now() { return options.now(); } };
     vm.runInNewContext(highlighter, context);
@@ -212,7 +217,7 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
     };
     return {
         card, wrapper, storage, legacyLocalStorage, id, tick, document: context.document, body, writes, errors, events, blobs, restore,
-        timers, windowListeners, reloads: () => reloads
+        timers, intervals, windowListeners, reloads: () => reloads
     };
 }
 
@@ -538,7 +543,9 @@ test('search panel shows counts, temporarily reveals hidden items and backs up s
     const result = scan(url, item, true);
     result.storage.buyee_item_registry.other = 'hide';
     result.tick();
-    assert.deepEqual(panelText(result.body), ['Stored items: 2', 'Hidden on this page: 1']);
+    const text = panelText(result.body);
+    assert.deepEqual(text.slice(0, 2), ['Stored items: 2', 'Hidden on this page: 1']);
+    assert.match(text[2], /^Next reload: (0[5-9]|10):[0-5][0-9]$/);
 
     const toggle = findByAction(result.body, 'toggle-hidden');
     toggle.listeners.click();
@@ -675,6 +682,10 @@ function pendingTimers(result, name) {
     return result.timers.filter(timer => timer?.callback.name === name);
 }
 
+function pendingIntervals(result, name) {
+    return result.intervals.filter(interval => interval?.callback.name === name);
+}
+
 function fireTimer(result, name) {
     const [timer] = pendingTimers(result, name);
     result.timers[result.timers.indexOf(timer)] = null;
@@ -721,6 +732,30 @@ test('search pages reload after 5-10 min and postpone one minute after a recent 
     now += 60000;
     fireTimer(result, 'tryAutoReload');
     assert.equal(result.reloads(), 1);
+});
+
+test('reload countdown ticks and resets when a reload is postponed', () => {
+    let now = 1000000;
+    const result = scan('https://neokyo.com/en/search/mercari', 'https://neokyo.com/en/product/mercari/m42470092884', true, false, undefined, false, { now: () => now });
+    const countdownText = () => panelText(result.body).find(text => text.startsWith('Next reload:'));
+    const initialSeconds = countdownText().match(/(\d+):(\d+)$/).slice(1).map(Number);
+    const [initialInterval] = pendingIntervals(result, 'updateReloadCountdown');
+    assert.equal(initialInterval.ms, 1000);
+
+    now += 1000;
+    initialInterval.callback();
+    const [minutes, seconds] = countdownText().match(/(\d+):(\d+)$/).slice(1).map(Number);
+    assert.equal(minutes * 60 + seconds, initialSeconds[0] * 60 + initialSeconds[1] - 1);
+
+    result.windowListeners.scroll.forEach(listener => listener());
+    now += 10000;
+    fireTimer(result, 'tryAutoReload');
+    assert.equal(countdownText(), 'Next reload: 01:00');
+    assert.equal(pendingIntervals(result, 'updateReloadCountdown').length, 1);
+
+    now += 1000;
+    pendingIntervals(result, 'updateReloadCountdown')[0].callback();
+    assert.equal(countdownText(), 'Next reload: 00:59');
 });
 
 test('auto-reload waits while seen items are not saved', () => {

@@ -404,8 +404,8 @@
         const root = host.attachShadow({ mode: 'open' });
         const style = document.createElement('style');
         style.textContent = `
-            section { box-sizing: border-box; display: flex; flex-direction: column; gap: 6px; width: 210px; padding: 10px; border: 1px solid #777; border-radius: 4px; background: #fff; color: #202020; font-family: sans-serif; }
-            p { margin: 0; line-height: 1.4; }
+            section { box-sizing: border-box; display: flex; flex-direction: column; gap: 6px; width: 210px; padding: 10px; border: 1px solid #777; border-radius: 4px; background: #fff; color: #202020; box-shadow: 0 2px 8px #0003; font: 13px/1.4 Verdana, sans-serif; }
+            p { margin: 0; }
             .pending { color: #b00020; }
             button { min-height: 32px; padding: 5px 8px; border: 1px solid #777; border-radius: 3px; background: #f5f5f5; color: #202020; font: inherit; cursor: pointer; }
             button:hover { background: #e5f3e8; }
@@ -612,7 +612,7 @@
                 const id = link ? getItemId(link.href) : null;
                 return id && itemRegistry[id] === 'hide';
             }).length;
-            console.info(`[Cross-Market Seen Item Highlighter] Neokyo scan: ${cards.length} cards, ${cardLinks.length} Mercari product links, sample ID ${sampleId || 'none'}, ${previouslySeenCount} previously seen.`);
+            console.info(`[Cross-Market Seen Item Highlighter] Neokyo scan: ${cards.length} cards, ${cardLinks.length} Mercari product links, sample ID ${sampleId || 'none'}, ${previouslySeenCount} already in shared registry.`);
             neokyoCardDiagnosticReported = true;
         }
 
