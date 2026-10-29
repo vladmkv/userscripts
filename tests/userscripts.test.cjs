@@ -925,7 +925,7 @@ test('closing-time parsing rejects invalid dates and countdown handles days and 
     assert.equal(formatTimeRemaining(0, 0), 'Closing time reached');
 });
 
-function auctionMonitor() {
+function auctionMonitor(initialClosingTime = '29 Oct 2026 21:52:00') {
     let now = Date.parse('2026-10-29T12:50:00Z');
     let tick;
     let response;
@@ -938,7 +938,7 @@ function auctionMonitor() {
             selector === '.itemDetail__listName' ? 'Closing Time (JST)' : time }) }],
         querySelector: () => ({ textContent: `${yen} YEN (Tax 0 yen)` })
     });
-    const page = makePage('29 Oct 2026 21:52:00');
+    const page = makePage(initialClosingTime);
     const panel = fakeElement('nav');
     const context = {
         URL, Intl, AbortController,
@@ -966,6 +966,36 @@ function auctionMonitor() {
         ok(value) { response = { ok: true, text: async () => value }; }
     };
 }
+
+test('auction checks wait until ten minutes remain without fetching a distant auction', async () => {
+    const monitor = auctionMonitor('29 Oct 2026 22:50:00');
+    assert.equal(monitor.panel.children[4].textContent, 'Next check: 50:00');
+    assert.equal([...monitor.timers.values()][0].delay, 3000000);
+    assert.equal(monitor.requests.length, 0);
+    monitor.advance(1000);
+    await monitor.check();
+    assert.equal(monitor.requests.length, 0);
+    assert.equal([...monitor.timers.values()][0].delay, 2999000);
+    monitor.advance(2999000);
+    monitor.ok(monitor.makePage('29 Oct 2026 22:50:00'));
+    await monitor.check();
+    assert.equal(monitor.requests.length, 1);
+    assert.equal([...monitor.timers.values()][0].delay, 30000);
+});
+
+test('auction extension beyond ten minutes pauses background checks until the window opens again', async () => {
+    const monitor = auctionMonitor();
+    monitor.ok(monitor.makePage('29 Oct 2026 22:10:00', '800'));
+    await monitor.check();
+    assert.equal(monitor.requests.length, 1);
+    assert.equal(monitor.panel.children[2].textContent, 'Current price: 800 YEN');
+    assert.equal(monitor.panel.children[4].textContent, 'Next check: 10:00');
+    assert.equal([...monitor.timers.values()][0].delay, 600000);
+    monitor.advance(600000);
+    await monitor.check();
+    assert.equal(monitor.requests.length, 2);
+    assert.equal([...monitor.timers.values()][0].delay, 30000);
+});
 
 test('auction background polling updates price and extensions without stale-page overwrite or overlap', async () => {
     const monitor = auctionMonitor();

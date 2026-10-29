@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Platform Item Links
 // @namespace    http://tampermonkey.net
-// @version      1.9
+// @version      1.10
 // @description  Open the same auction, Mercari or Flea Market item on another proxy platform.
 // @icon         https://buyee.jp/favicon.ico
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Platform-Item-Links.user.js
@@ -203,6 +203,7 @@
                 stopChecks();
                 return;
             }
+            delay = Math.max(delay, details.closingTime - Date.now() - 600000);
             nextCheckAt = Date.now() + delay;
             updateNextCheck();
             setTimeout(checkAuction, delay);
@@ -211,6 +212,10 @@
         async function checkAuction() {
             if (Date.now() - details.closingTime > 120000) {
                 stopChecks();
+                return;
+            }
+            if (details.closingTime - Date.now() > 600000) {
+                scheduleCheck(0);
                 return;
             }
             checking = true;
