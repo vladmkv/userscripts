@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Platform Item Links
 // @namespace    http://tampermonkey.net
-// @version      1.6
+// @version      1.8
 // @description  Open the same auction, Mercari or Flea Market item on another proxy platform.
 // @icon         https://buyee.jp/favicon.ico
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Platform-Item-Links.user.js
@@ -110,6 +110,142 @@
         move.textContent = side === 'left' ? 'Move panel right' : 'Move panel left';
     }
 
+    function parseClosingTime(text) {
+        const match = text.trim().match(/^(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/);
+        if (!match) return null;
+        const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+        const month = months.indexOf(match[2].toLowerCase());
+        const day = Number(match[1]);
+        const year = Number(match[3]);
+        const hour = Number(match[4]);
+        const minute = Number(match[5]);
+        const second = Number(match[6]);
+        if (month < 0 || year < 100 || hour > 23 || minute > 59 || second > 59) return null;
+        const wallTime = new Date(Date.UTC(year, month, day, hour, minute, second));
+        if (wallTime.getUTCMonth() !== month || wallTime.getUTCDate() !== day) return null;
+        return wallTime.getTime() - 9 * 60 * 60 * 1000;
+    }
+
+    function formatTimeRemaining(closingTime, now) {
+        const secondsRemaining = Math.ceil((closingTime - now) / 1000);
+        if (secondsRemaining <= 0) return 'Closing time reached';
+        const days = Math.floor(secondsRemaining / 86400);
+        const hours = Math.floor(secondsRemaining % 86400 / 3600);
+        const minutes = Math.floor(secondsRemaining % 3600 / 60);
+        const seconds = secondsRemaining % 60;
+        const clock = [hours, minutes, seconds].map(value => String(value).padStart(2, '0')).join(':');
+        return `Time left: ${days ? `${days}d ` : ''}${clock}`;
+    }
+
+    function readAuctionDetails(page) {
+        const row = Array.from(page.querySelectorAll('.itemDetail__list')).find(element =>
+            element.querySelector('.itemDetail__listName')?.textContent.trim() === 'Closing Time (JST)');
+        const closingTime = parseClosingTime(row?.querySelector('.itemDetail__listValue')?.textContent || '');
+        const priceText = page.querySelector('.current_price .price')?.textContent || '';
+        const price = priceText.match(/^\s*([\d,]+)\s+YEN\b/i);
+        return { closingTime, price: price ? `${price[1]} YEN` : null };
+    }
+
+    function auctionPollDelay(remaining) {
+        const period = remaining > 300000 ? 60000 : remaining > 120000 ? 30000 : 15000;
+        return period * (0.5 + Math.random() * 0.5);
+    }
+
+    function startClosingCountdown(panel) {
+        const closing = document.createElement('p');
+        const countdown = document.createElement('p');
+        const price = document.createElement('p');
+        const status = document.createElement('p');
+        closing.hidden = true;
+        countdown.hidden = true;
+        price.hidden = true;
+        countdown.className = 'countdown';
+        const formatter = new Intl.DateTimeFormat('en-GB', {
+            timeZone: 'Europe/Helsinki', day: '2-digit', month: 'short', year: 'numeric',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', timeZoneName: 'short'
+        });
+        const checkedFormatter = new Intl.DateTimeFormat('en-GB', {
+            timeZone: 'Europe/Helsinki', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+        });
+        let details = { closingTime: null, price: null };
+        let remoteLoaded = false;
+        let started = false;
+        let failures = 0;
+        let lastChecked = null;
+        panel.append(closing, countdown, price, status);
+
+        function scheduleCheck(delay) {
+            if (Date.now() - details.closingTime > 120000) {
+                status.textContent = 'Checks stopped: closing time passed.';
+                return;
+            }
+            setTimeout(checkAuction, delay);
+        }
+
+        async function checkAuction() {
+            if (Date.now() - details.closingTime > 120000) {
+                status.textContent = 'Checks stopped: closing time passed.';
+                return;
+            }
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 20000);
+            let retryAfter = 0;
+            try {
+                const response = await fetch(location.href, {
+                    credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal
+                });
+                if (!response.ok) {
+                    const header = response.headers.get('Retry-After');
+                    const seconds = Number(header);
+                    retryAfter = header ? (Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header) - Date.now()) : 0;
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const page = new DOMParser().parseFromString(await response.text(), 'text/html');
+                if (/just a moment|verify you are human|access denied|sign in|log in/i.test(page.title)) {
+                    throw new Error('Auction page unavailable');
+                }
+                const next = readAuctionDetails(page);
+                if (next.closingTime === null || next.price === null) throw new Error('Auction fields unavailable');
+                details = next;
+                remoteLoaded = true;
+                failures = 0;
+                lastChecked = Date.now();
+                status.textContent = `Checked: ${checkedFormatter.format(lastChecked)}`;
+                updateClosingCountdown();
+            } catch (error) {
+                failures++;
+                const checked = lastChecked === null ? 'not yet checked' : `last checked ${checkedFormatter.format(lastChecked)}`;
+                status.textContent = `Check failed; ${checked}. Retrying.`;
+            } finally {
+                clearTimeout(timeout);
+            }
+            const delay = failures ? Math.max(
+                Math.min(300000, 30000 * 2 ** Math.min(failures - 1, 4)) * (1 + Math.random() * 0.5),
+                Number.isFinite(retryAfter) ? retryAfter : 0
+            ) : auctionPollDelay(details.closingTime - Date.now());
+            scheduleCheck(delay);
+        }
+
+        function updateClosingCountdown() {
+            if (!remoteLoaded) details = readAuctionDetails(document);
+            const { closingTime } = details;
+            closing.hidden = closingTime === null;
+            countdown.hidden = closingTime === null;
+            price.hidden = details.price === null;
+            if (details.price !== null) price.textContent = `Current price: ${details.price}`;
+            if (closingTime === null) return;
+            closing.textContent = `Closes: ${formatter.format(closingTime)}`;
+            countdown.textContent = formatTimeRemaining(closingTime, Date.now());
+            if (!started) {
+                started = true;
+                status.textContent = 'Not yet checked; showing loaded page.';
+                scheduleCheck(auctionPollDelay(closingTime - Date.now()));
+            }
+        }
+        updateClosingCountdown();
+        setInterval(updateClosingCountdown, 1000);
+    }
+
     function renderPanel(href = location.href) {
         const item = identifyItem(href);
         if (!item || document.getElementById(PANEL_ID)) return;
@@ -122,6 +258,7 @@
             :host { color-scheme: light; }
             nav { box-sizing: border-box; max-width: 320px; padding: 10px; border: 1px solid #777; border-radius: 4px; background: #fff; color: #202020; box-shadow: 0 2px 8px #0003; font: 13px/1.4 Verdana, sans-serif; letter-spacing: 0; }
             p { margin: 0 0 8px; overflow-wrap: anywhere; }
+            .countdown { font-variant-numeric: tabular-nums; min-height: 19px; }
             .links { display: flex; flex-direction: column; gap: 6px; }
             a, button { display: flex; align-items: center; gap: 8px; box-sizing: border-box; width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid #777; border-radius: 3px; background: #f5f5f5; color: #202020; font: inherit; text-align: left; text-decoration: none; }
             .favicon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 18px; width: 18px; height: 18px; object-fit: contain; font-weight: bold; }
@@ -166,6 +303,7 @@
             applyPanelSide(host, move);
         });
         applyPanelSide(host, move);
+        if (item.site === 'Buyee') startClosingCountdown(nav);
         nav.append(label, links, move);
         root.append(style, nav);
         document.body.append(host);

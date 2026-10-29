@@ -830,7 +830,7 @@ test('platform panel metadata includes update URLs and does not request network 
     assert.deepEqual(grants, ['GM_getValue', 'GM_setValue']);
     assert.ok(itemLinksSource.includes('// @icon         https://buyee.jp/favicon.ico'));
     assert.ok(itemLinksSource.includes('https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Platform-Item-Links.user.js'));
-    assert.equal(/\b(?:fetch|GM_xmlhttpRequest)\s*\(/.test(itemLinksSource), false);
+    assert.equal(/\bGM_xmlhttpRequest\s*\(/.test(itemLinksSource), false);
     assert.deepEqual([...itemLinksSource.matchAll(/GM_(?:get|set)Value\((\w+)/g)].map(match => match[1]).filter(key => key !== 'PANEL_SIDE_KEY'), []);
 });
 
@@ -857,6 +857,184 @@ test('platform panel starts lower-left and remembers a move to the right', () =>
     assert.equal(host.style.right, '12px');
     assert.equal(move.textContent, 'Move panel left');
     assert.equal(render().style.right, '12px');
+});
+
+test('Buyee closing countdown parses JST and follows changed or replaced closing-time rows', () => {
+    let now = Date.parse('2026-10-29T12:50:00Z');
+    let tick;
+    let rows = [];
+    const body = fakeElement('body');
+    const context = {
+        URL, Intl, Date: class extends Date { static now() { return now; } },
+        location: new URL('https://buyee.jp/item/jdirectitems/auction/x1248934501'),
+        GM_getValue: (key, fallback) => fallback,
+        GM_setValue() {},
+        setTimeout() {},
+        setInterval(callback, delay) { tick = callback; assert.equal(delay, 1000); },
+        document: {
+            body, createElement: fakeElement, getElementById: () => null,
+            querySelector: () => null,
+            querySelectorAll: () => rows
+        }
+    };
+    vm.runInNewContext(itemLinksSource, context);
+    const panel = body.children[0].shadowRoot.children.find(element => element.tag === 'nav');
+    const [closing, countdown] = panel.children;
+    assert.equal(closing.hidden, true);
+    const value = { textContent: '29 Oct 2026 21:52:00' };
+    const makeRow = field => ({
+        querySelector: selector => selector === '.itemDetail__listName'
+            ? { textContent: 'Closing Time (JST)' } : field
+    });
+    rows = [makeRow(value)];
+    tick();
+    assert.equal(closing.hidden, false);
+    assert.match(closing.textContent, /29 Oct 2026.*14:52:00 EET/);
+    assert.equal(countdown.textContent, 'Time left: 00:02:00');
+    now += 1000;
+    tick();
+    assert.equal(countdown.textContent, 'Time left: 00:01:59');
+    now -= 1000;
+    value.textContent = '29 Oct 2026 21:57:00';
+    tick();
+    assert.equal(countdown.textContent, 'Time left: 00:07:00');
+    rows = [makeRow({ textContent: '29 Oct 2026 21:49:00' })];
+    tick();
+    assert.equal(countdown.textContent, 'Closing time reached');
+    rows = [makeRow({ textContent: '29 Jul 2027 21:52:00' })];
+    tick();
+    assert.match(closing.textContent, /29 Jul 2027.*15:52:00 EEST/);
+    rows = [makeRow({ textContent: 'Unavailable' })];
+    tick();
+    assert.equal(countdown.hidden, true);
+});
+
+test('closing-time parsing rejects invalid dates and countdown handles days and partial seconds', () => {
+    const context = {};
+    vm.runInNewContext(itemLinksSource.replace('    renderPanel();',
+        '    globalThis.api = { parseClosingTime, formatTimeRemaining };'), context);
+    const { parseClosingTime, formatTimeRemaining } = context.api;
+    assert.equal(parseClosingTime(' 29 Oct 2026 21:52:00 '), Date.parse('2026-10-29T12:52:00Z'));
+    assert.equal(parseClosingTime('01 Jan 2027 00:30:00'), Date.parse('2026-12-31T15:30:00Z'));
+    for (const text of ['31 Feb 2026 21:52:00', '00 Oct 2026 21:52:00', '29 Oct 2026 24:00:00',
+        '29 Oct 2026 21:60:00', '29 Oct 2026 21:52:60', '29 Xxx 2026 21:52:00', '']) {
+        assert.equal(parseClosingTime(text), null, text);
+    }
+    assert.equal(formatTimeRemaining(90061000, 0), 'Time left: 1d 01:01:01');
+    assert.equal(formatTimeRemaining(1, 0), 'Time left: 00:00:01');
+    assert.equal(formatTimeRemaining(0, 0), 'Closing time reached');
+});
+
+function auctionMonitor() {
+    let now = Date.parse('2026-10-29T12:50:00Z');
+    let tick;
+    let response;
+    const requests = [];
+    const timers = new Map();
+    let nextTimer = 0;
+    const makePage = (time, yen = '500', title = 'Auction') => ({
+        title,
+        querySelectorAll: () => [{ querySelector: selector => ({ textContent:
+            selector === '.itemDetail__listName' ? 'Closing Time (JST)' : time }) }],
+        querySelector: () => ({ textContent: `${yen} YEN (Tax 0 yen)` })
+    });
+    const page = makePage('29 Oct 2026 21:52:00');
+    const panel = fakeElement('nav');
+    const context = {
+        URL, Intl, AbortController,
+        Math: Object.assign(Object.create(Math), { random: () => 0 }),
+        Date: class extends Date { static now() { return now; } },
+        location: new URL('https://buyee.jp/item/jdirectitems/auction/x1248934501'),
+        document: { ...page, createElement: fakeElement },
+        DOMParser: class { parseFromString(text, type) { assert.equal(type, 'text/html'); return text; } },
+        setInterval(callback) { tick = callback; },
+        setTimeout(callback, delay) { timers.set(++nextTimer, { callback, delay }); return nextTimer; },
+        clearTimeout(handle) { timers.delete(handle); },
+        fetch: async (url, options) => { requests.push({ url, options }); return await response; }
+    };
+    vm.runInNewContext(itemLinksSource.replace('    renderPanel();', '    globalThis.start = startClosingCountdown;'), context);
+    context.start(panel);
+    const check = () => {
+        const [handle, timer] = [...timers].find(([, entry]) => entry.callback.name === 'checkAuction');
+        timers.delete(handle);
+        return timer.callback();
+    };
+    return {
+        panel, requests, timers, check, tick: () => tick(), makePage,
+        advance(ms) { now += ms; },
+        reply(value) { response = value; },
+        ok(value) { response = { ok: true, text: async () => value }; }
+    };
+}
+
+test('auction background polling updates price and extensions without stale-page overwrite or overlap', async () => {
+    const monitor = auctionMonitor();
+    assert.equal([...monitor.timers.values()][0].delay, 7500);
+    let resolve;
+    monitor.reply(new Promise(done => { resolve = done; }));
+    const pending = monitor.check();
+    assert.equal(monitor.requests.length, 1);
+    assert.equal([...monitor.timers.values()].some(timer => timer.callback.name === 'checkAuction'), false);
+    resolve({ ok: true, text: async () => monitor.makePage('29 Oct 2026 21:54:00', '1,200') });
+    await pending;
+    const [closing, countdown, price, status] = monitor.panel.children;
+    assert.match(closing.textContent, /14:54:00 EET/);
+    assert.equal(price.textContent, 'Current price: 1,200 YEN');
+    assert.equal(countdown.textContent, 'Time left: 00:04:00');
+    assert.match(status.textContent, /^Checked:/);
+    assert.equal([...monitor.timers.values()][0].delay, 15000);
+    monitor.advance(1000);
+    monitor.tick();
+    assert.equal(countdown.textContent, 'Time left: 00:03:59');
+    assert.equal(price.textContent, 'Current price: 1,200 YEN');
+    assert.equal(monitor.requests[0].options.cache, 'no-store');
+    assert.equal(monitor.requests[0].options.redirect, 'error');
+    assert.equal(monitor.requests[0].url, 'https://buyee.jp/item/jdirectitems/auction/x1248934501');
+    monitor.ok(monitor.makePage('29 Oct 2026 22:00:00', '1,300'));
+    await monitor.check();
+    assert.equal([...monitor.timers.values()][0].delay, 30000);
+});
+
+test('auction checks keep last good data on invalid pages and respect rate-limit backoff', async () => {
+    const monitor = auctionMonitor();
+    monitor.ok(monitor.makePage('29 Oct 2026 21:53:00', '600'));
+    await monitor.check();
+    monitor.ok(monitor.makePage('invalid', '700', 'Just a moment'));
+    await monitor.check();
+    assert.equal(monitor.panel.children[2].textContent, 'Current price: 600 YEN');
+    assert.match(monitor.panel.children[3].textContent, /Check failed; last checked/);
+    assert.equal([...monitor.timers.values()][0].delay, 30000);
+    monitor.reply({ ok: false, status: 429, headers: { get: () => '120' } });
+    await monitor.check();
+    assert.equal([...monitor.timers.values()][0].delay, 120000);
+    monitor.ok(monitor.makePage('invalid'));
+    await monitor.check();
+    assert.equal(monitor.panel.children[2].textContent, 'Current price: 600 YEN');
+});
+
+test('auction checks continue past the old deadline to catch extensions and stop after the grace window', async () => {
+    const monitor = auctionMonitor();
+    monitor.advance(150000);
+    monitor.ok(monitor.makePage('29 Oct 2026 21:57:00', '750'));
+    await monitor.check();
+    assert.equal(monitor.panel.children[1].textContent, 'Time left: 00:04:30');
+    monitor.advance(400000);
+    await monitor.check();
+    assert.equal(monitor.requests.length, 1);
+    assert.equal(monitor.timers.size, 0);
+    assert.match(monitor.panel.children[3].textContent, /Checks stopped/);
+});
+
+test('auction polling randomizes each interval from half to the whole selected period', () => {
+    let random = 0;
+    const context = { Math: Object.assign(Object.create(Math), { random: () => random }) };
+    vm.runInNewContext(itemLinksSource.replace('    renderPanel();', '    globalThis.delay = auctionPollDelay;'), context);
+    for (const [remaining, period] of [[300001, 60000], [300000, 30000], [120001, 30000], [120000, 15000], [-1, 15000]]) {
+        random = 0;
+        assert.equal(context.delay(remaining), period / 2);
+        random = 0.999999;
+        assert.ok(context.delay(remaining) < period && context.delay(remaining) > period * 0.99);
+    }
 });
 
 test('platform button icons precede labels and use the matching site favicon URL', () => {
