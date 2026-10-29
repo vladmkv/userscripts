@@ -1,6 +1,6 @@
 # Userscripts
 
-Independent Tampermonkey scripts for Japanese shopping search pages.
+Independent Tampermonkey scripts for Japanese shopping pages and Google AI Mode.
 
 ## Install
 
@@ -9,6 +9,7 @@ Install Tampermonkey in Chrome, then open a raw script link:
 - [Cross-Market Seen Item Highlighter](https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js)
 - [Neokyo Yahoo Category Selector](https://raw.githubusercontent.com/vladmkv/userscripts/main/Neokyo-Category-Selector.user.js)
 - [Cross-Platform Item Links](https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Platform-Item-Links.user.js)
+- [Google AI Mode - Lightweight History](https://raw.githubusercontent.com/vladmkv/userscripts/main/Google-AI-Mode-Lightweight.user.js)
 
 If the highlighter is already installed, update that existing Tampermonkey entry
 rather than deleting it or creating a second copy. Its name and namespace are
@@ -93,12 +94,25 @@ and may request an icon on a cache miss. No item or search pages are requested i
 the background. Destination pages open only when a link is clicked. Equivalent
 IDs do not guarantee a listing remains available.
 
+## Google AI Mode - Lightweight History
+
+Experimental workaround for rendering-related lag in long Google Search AI Mode
+conversations on `www.google.com/search`. Keeps the latest three recognized answer
+containers visible and hides older answers with CSS. Questions are unchanged;
+message content is not deleted or sent elsewhere. No conversation data is stored.
+
+Use the script's Tampermonkey menu commands to restore all answers and pause
+hiding, resume hiding, or show the hidden-answer count. Reloading enables hiding
+again. Hidden answers are unavailable to normal page search and accessibility
+navigation until restored. Selectors depend on Google's current markup, and real
+Chrome typing performance has not yet been verified.
+
 ## Local Checks
 
 Requires Node.js 18 or later; no package installation is needed:
 
 ```powershell
-node --test tests/userscripts.test.cjs
+node --test tests/*.test.cjs
 ```
 
 Tests exercise URL handling, metadata, and a simulated userscript DOM/storage
