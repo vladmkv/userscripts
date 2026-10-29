@@ -101,8 +101,15 @@ conversations on `www.google.com/search`. Keeps the latest three recognized answ
 containers visible and hides older answers with CSS. Questions are unchanged;
 message content is not deleted or sent elsewhere. No conversation data is stored.
 
-Version 0.1.1 worsened typing latency in the recorded comparison. Version 0.1.2 is
-a diagnostic release, not a proven fix: it starts paused on every reload, with no
+Version 0.1.1 worsened typing latency in the recorded comparison. Version 0.2.0
+targets a measured cause instead. In a Chrome CSS selector-statistics trace, Google's
+selector `:has(.WTfRgd, .zlmqU):has(.B5aSS) :is(.Y3BBE, .n6owBd)` took 65% of
+selector-matching time during typing and matched no elements. The script removes
+only that selector from Google's stylesheets on load, rechecking every three seconds
+for newly added stylesheets. Turn CSS fix off restores the original rule. The typing
+improvement has not yet been measured.
+
+Answer hiding starts paused on every reload, with no
 automatic scan, mutation observation, or hiding. Use the script's Tampermonkey
 menu to enable hiding explicitly. Restore all answers disconnects its observer
 and removes its hiding classes. Hidden answers are unavailable to normal page
