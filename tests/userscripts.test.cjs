@@ -983,6 +983,24 @@ test('auction checks wait until ten minutes remain without fetching a distant au
     assert.equal([...monitor.timers.values()][0].delay, 30000);
 });
 
+test('next-check countdown includes days and hours only when needed', () => {
+    const monitor = auctionMonitor('31 Oct 2026 01:00:00');
+    const nextCheck = monitor.panel.children[4];
+    assert.equal(nextCheck.textContent, 'Next check: 01:03:00:00');
+    monitor.advance(3 * 3600000 + 1000);
+    monitor.tick();
+    assert.equal(nextCheck.textContent, 'Next check: 23:59:59');
+    monitor.advance(23 * 3600000);
+    monitor.tick();
+    assert.equal(nextCheck.textContent, 'Next check: 59:59');
+    monitor.advance(3598000);
+    monitor.tick();
+    assert.equal(nextCheck.textContent, 'Next check: 00:01');
+    monitor.advance(1000);
+    monitor.tick();
+    assert.equal(nextCheck.textContent, 'Next check: 00:00');
+});
+
 test('auction extension beyond ten minutes pauses background checks until the window opens again', async () => {
     const monitor = auctionMonitor();
     monitor.ok(monitor.makePage('29 Oct 2026 22:10:00', '800'));

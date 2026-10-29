@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Platform Item Links
 // @namespace    http://tampermonkey.net
-// @version      1.10
+// @version      1.11
 // @description  Open the same auction, Mercari or Flea Market item on another proxy platform.
 // @icon         https://buyee.jp/favicon.ico
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Platform-Item-Links.user.js
@@ -185,9 +185,12 @@
             else if (nextCheckAt === null) nextCheck.textContent = 'Next check: waiting for closing time';
             else {
                 const remaining = Math.max(0, Math.ceil((nextCheckAt - Date.now()) / 1000));
-                const minutes = String(Math.floor(remaining / 60)).padStart(2, '0');
-                const seconds = String(remaining % 60).padStart(2, '0');
-                nextCheck.textContent = `Next check: ${minutes}:${seconds}`;
+                const days = Math.floor(remaining / 86400);
+                const hours = Math.floor(remaining % 86400 / 3600);
+                const parts = [Math.floor(remaining % 3600 / 60), remaining % 60];
+                if (days || hours) parts.unshift(hours);
+                if (days) parts.unshift(days);
+                nextCheck.textContent = `Next check: ${parts.map(value => String(value).padStart(2, '0')).join(':')}`;
             }
         }
 
