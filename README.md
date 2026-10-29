@@ -101,11 +101,26 @@ conversations on `www.google.com/search`. Keeps the latest three recognized answ
 containers visible and hides older answers with CSS. Questions are unchanged;
 message content is not deleted or sent elsewhere. No conversation data is stored.
 
-Use the script's Tampermonkey menu commands to restore all answers and pause
-hiding, resume hiding, or show the hidden-answer count. Reloading enables hiding
-again. Hidden answers are unavailable to normal page search and accessibility
-navigation until restored. Selectors depend on Google's current markup, and real
-Chrome typing performance has not yet been verified.
+Version 0.1.1 worsened typing latency in the recorded comparison. Version 0.1.2 is
+a diagnostic release, not a proven fix: it starts paused on every reload, with no
+automatic scan, mutation observation, or hiding. Use the script's Tampermonkey
+menu to enable hiding explicitly. Restore all answers disconnects its observer
+and removes its hiding classes. Hidden answers are unavailable to normal page
+search and accessibility navigation until restored. Selectors depend on Google's
+current markup.
+
+For diagnosis, record in Chrome Performance while paused, type a short unsent
+draft, select Keep latest 3 answers (resume), then type again. Restore all answers
+if the delay worsens. The timeline includes `AIMLH scan`, `AIMLH apply hiding`,
+`AIMLH observer`, and `AIMLH restore all` User Timing measurements. They measure
+the script operations, not all subsequent browser rendering work.
+
+Show lightweight history status logs matched/recognized/hidden answer counts and
+cumulative scan, mutation, and class-change counters with the console prefix
+`[AI Mode Lightweight]`. Automatic update summaries are limited to once every
+five seconds; no chat text or individual keystrokes are logged. Reset diagnostic
+counters starts a fresh counting interval. Save the Performance recording and
+retain the console snapshots for comparison.
 
 ## Local Checks
 

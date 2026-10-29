@@ -7,9 +7,14 @@ const vm = require('node:vm');
 const filename = 'Google-AI-Mode-Lightweight.user.js';
 const source = fs.readFileSync(path.join(__dirname, '..', filename), 'utf8');
 
-function setup(count) {
+function setup(count, start = true) {
     const menus = new Map();
     const timers = [];
+    const logs = [];
+    const marks = new Set();
+    const measures = [];
+    const observation = { active: false };
+    let clock = 0;
     let mutation;
     const answers = Array.from({ length: count }, () => {
         const classes = new Set();
@@ -28,16 +33,30 @@ function setup(count) {
     const document = { querySelectorAll: () => answers, activeElement: null, documentElement: {} };
     vm.runInNewContext(source, {
         document,
+        console: { info: (...args) => logs.push(args) },
+        performance: {
+            now: () => clock++,
+            mark: name => marks.add(name),
+            measure: (name, begin, end) => {
+                assert.ok(marks.has(begin));
+                assert.ok(marks.has(end));
+                measures.push(name);
+            },
+            clearMarks: name => marks.delete(name),
+            clearMeasures() {}
+        },
         GM_addStyle: style => assert.match(style, /display: none !important/),
         GM_registerMenuCommand: (label, callback) => menus.set(label, callback),
         MutationObserver: class {
             constructor(callback) { mutation = callback; }
-            observe() {}
+            observe() { observation.active = true; }
+            disconnect() { observation.active = false; }
         },
         setTimeout: callback => timers.push(callback),
         alert() {}
     });
-    return { answers, document, menus, timers, mutation,
+    if (start) menus.get('Keep latest 3 answers (resume)')();
+    return { answers, document, menus, timers, mutation, logs, marks, measures, observation,
         hidden: () => answers.filter(answer => answer.classes.size).length,
         restore: () => menus.get('Restore all answers (pause hiding)')(),
         resume: () => menus.get('Keep latest 3 answers (resume)')(),
@@ -112,4 +131,55 @@ test('disconnected answers have their script-owned class restored', () => {
     state.resume();
     assert.equal(removed.classes.size, 0);
     assert.equal(state.hidden(), 0);
+});
+
+test('diagnostic release starts paused without scanning or observing', () => {
+    const state = setup(8, false);
+    assert.equal(state.hidden(), 0);
+    assert.equal(state.observation.active, false);
+    assert.equal(state.logs[0][2].scans, 0);
+    assert.equal(state.measures.length, 0);
+});
+
+test('pause disconnects the observer and restores all script-hidden answers', () => {
+    const state = setup(8);
+    assert.equal(state.observation.active, true);
+    state.restore();
+    assert.equal(state.observation.active, false);
+    assert.equal(state.hidden(), 0);
+    assert.ok(state.measures.includes('AIMLH restore all'));
+});
+
+test('scan, hiding, and observer measurements leave no accumulated marks', () => {
+    const state = setup(8);
+    state.mutation([{ target: { nodeType: 1, closest: () => null }, addedNodes: [], removedNodes: [] }]);
+    assert.ok(state.measures.includes('AIMLH scan'));
+    assert.ok(state.measures.includes('AIMLH apply hiding'));
+    assert.ok(state.measures.includes('AIMLH observer'));
+    assert.equal(state.marks.size, 0);
+});
+
+test('diagnostic snapshots report counts without logging message contents', () => {
+    const state = setup(8, false);
+    state.answers[0].textContent = 'PRIVATE CHAT TEXT';
+    state.menus.get('Show lightweight history status')();
+    const snapshot = state.logs.at(-1)[2];
+    assert.equal(snapshot.candidates, 8);
+    assert.equal(snapshot.answers, 8);
+    assert.equal(snapshot.hiddenAnswers, 0);
+    assert.equal(snapshot.enabled, false);
+    assert.equal(JSON.stringify(state.logs).includes('PRIVATE CHAT TEXT'), false);
+    assert.equal(state.observation.active, false);
+});
+
+test('repeated updates do not reapply hiding classes or flood the console', () => {
+    const state = setup(8);
+    state.mutation([{ target: { nodeType: 1, closest: () => null }, addedNodes: [state.answers[0]], removedNodes: [] }]);
+    const logCount = state.logs.length;
+    state.flush();
+    assert.equal(state.logs.length, logCount);
+    state.menus.get('Show lightweight history status')();
+    assert.equal(state.logs.at(-1)[2].classChanges, 5);
+    state.menus.get('Reset diagnostic counters')();
+    assert.equal(state.logs.at(-1)[2].scans, 0);
 });
