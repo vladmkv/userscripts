@@ -1002,7 +1002,7 @@ test('auction checks keep last good data on invalid pages and respect rate-limit
     monitor.ok(monitor.makePage('invalid', '700', 'Just a moment'));
     await monitor.check();
     assert.equal(monitor.panel.children[2].textContent, 'Current price: 600 YEN');
-    assert.match(monitor.panel.children[3].textContent, /Check failed; last checked/);
+    assert.match(monitor.panel.children[3].textContent, /Security challenge or login page returned.*last checked/);
     assert.equal([...monitor.timers.values()][0].delay, 30000);
     monitor.reply({ ok: false, status: 429, headers: { get: () => '120' } });
     await monitor.check();
@@ -1023,6 +1023,51 @@ test('auction checks continue past the old deadline to catch extensions and stop
     assert.equal(monitor.requests.length, 1);
     assert.equal(monitor.timers.size, 0);
     assert.match(monitor.panel.children[3].textContent, /Checks stopped/);
+    assert.equal(monitor.panel.children[4].textContent, 'Next check: stopped');
+});
+
+test('next-check countdown ticks, shows an in-flight check and resets for rate-limit retries', async () => {
+    const monitor = auctionMonitor();
+    const nextCheck = monitor.panel.children[4];
+    assert.equal(nextCheck.textContent, 'Next check: 00:08');
+    monitor.advance(2000);
+    monitor.tick();
+    assert.equal(nextCheck.textContent, 'Next check: 00:06');
+    let resolve;
+    monitor.reply(new Promise(done => { resolve = done; }));
+    const pending = monitor.check();
+    assert.equal(nextCheck.textContent, 'Checking now...');
+    monitor.tick();
+    assert.equal(nextCheck.textContent, 'Checking now...');
+    resolve({ ok: false, status: 429, headers: { get: () => '120' } });
+    await pending;
+    assert.match(monitor.panel.children[3].textContent, /HTTP 429.*not yet checked/);
+    assert.equal(nextCheck.textContent, 'Next check: 02:00');
+    monitor.advance(1000);
+    monitor.tick();
+    assert.equal(nextCheck.textContent, 'Next check: 01:59');
+    monitor.ok(monitor.makePage('29 Oct 2026 21:54:00'));
+    await monitor.check();
+    assert.match(monitor.panel.children[3].textContent, /^Checked:/);
+    assert.equal(nextCheck.textContent, 'Next check: 00:15');
+});
+
+test('auction failure diagnostics distinguish missing fields, network failures and timeouts', async () => {
+    const monitor = auctionMonitor();
+    monitor.ok(monitor.makePage('invalid'));
+    await monitor.check();
+    assert.match(monitor.panel.children[3].textContent, /Closing Time \(JST\) missing or invalid/);
+    monitor.ok(monitor.makePage('29 Oct 2026 21:52:00', 'unavailable'));
+    await monitor.check();
+    assert.match(monitor.panel.children[3].textContent, /Current price missing or invalid/);
+    monitor.reply({ ok: true, text: async () => { throw new TypeError('Failed to fetch'); } });
+    await monitor.check();
+    assert.match(monitor.panel.children[3].textContent, /TypeError: Failed to fetch/);
+    const timeoutError = new Error('Aborted');
+    timeoutError.name = 'AbortError';
+    monitor.reply({ ok: true, text: async () => { throw timeoutError; } });
+    await monitor.check();
+    assert.match(monitor.panel.children[3].textContent, /Request timed out after 20 seconds/);
 });
 
 test('auction polling randomizes each interval from half to the whole selected period', () => {

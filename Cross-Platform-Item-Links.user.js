@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Platform Item Links
 // @namespace    http://tampermonkey.net
-// @version      1.8
+// @version      1.9
 // @description  Open the same auction, Mercari or Flea Market item on another proxy platform.
 // @icon         https://buyee.jp/favicon.ico
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Platform-Item-Links.user.js
@@ -156,6 +156,8 @@
         const countdown = document.createElement('p');
         const price = document.createElement('p');
         const status = document.createElement('p');
+        const nextCheck = document.createElement('p');
+        nextCheck.className = 'countdown';
         closing.hidden = true;
         countdown.hidden = true;
         price.hidden = true;
@@ -172,21 +174,48 @@
         let started = false;
         let failures = 0;
         let lastChecked = null;
-        panel.append(closing, countdown, price, status);
+        let nextCheckAt = null;
+        let checking = false;
+        let stopped = false;
+        panel.append(closing, countdown, price, status, nextCheck);
+
+        function updateNextCheck() {
+            if (checking) nextCheck.textContent = 'Checking now...';
+            else if (stopped) nextCheck.textContent = 'Next check: stopped';
+            else if (nextCheckAt === null) nextCheck.textContent = 'Next check: waiting for closing time';
+            else {
+                const remaining = Math.max(0, Math.ceil((nextCheckAt - Date.now()) / 1000));
+                const minutes = String(Math.floor(remaining / 60)).padStart(2, '0');
+                const seconds = String(remaining % 60).padStart(2, '0');
+                nextCheck.textContent = `Next check: ${minutes}:${seconds}`;
+            }
+        }
+
+        function stopChecks() {
+            stopped = true;
+            nextCheckAt = null;
+            status.textContent = 'Checks stopped: closing time passed.';
+            updateNextCheck();
+        }
 
         function scheduleCheck(delay) {
             if (Date.now() - details.closingTime > 120000) {
-                status.textContent = 'Checks stopped: closing time passed.';
+                stopChecks();
                 return;
             }
+            nextCheckAt = Date.now() + delay;
+            updateNextCheck();
             setTimeout(checkAuction, delay);
         }
 
         async function checkAuction() {
             if (Date.now() - details.closingTime > 120000) {
-                status.textContent = 'Checks stopped: closing time passed.';
+                stopChecks();
                 return;
             }
+            checking = true;
+            nextCheckAt = null;
+            updateNextCheck();
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 20000);
             let retryAfter = 0;
@@ -202,10 +231,11 @@
                 }
                 const page = new DOMParser().parseFromString(await response.text(), 'text/html');
                 if (/just a moment|verify you are human|access denied|sign in|log in/i.test(page.title)) {
-                    throw new Error('Auction page unavailable');
+                    throw new Error('Security challenge or login page returned');
                 }
                 const next = readAuctionDetails(page);
-                if (next.closingTime === null || next.price === null) throw new Error('Auction fields unavailable');
+                if (next.closingTime === null) throw new Error('Closing Time (JST) missing or invalid in response');
+                if (next.price === null) throw new Error('Current price missing or invalid in response');
                 details = next;
                 remoteLoaded = true;
                 failures = 0;
@@ -215,8 +245,11 @@
             } catch (error) {
                 failures++;
                 const checked = lastChecked === null ? 'not yet checked' : `last checked ${checkedFormatter.format(lastChecked)}`;
-                status.textContent = `Check failed; ${checked}. Retrying.`;
+                const reason = error?.name === 'AbortError' ? 'Request timed out after 20 seconds'
+                    : `${error?.name || 'Error'}: ${error?.message || String(error)}`;
+                status.textContent = `Check failed (${reason.slice(0, 200)}); ${checked}. Retrying.`;
             } finally {
+                checking = false;
                 clearTimeout(timeout);
             }
             const delay = failures ? Math.max(
@@ -227,6 +260,7 @@
         }
 
         function updateClosingCountdown() {
+            updateNextCheck();
             if (!remoteLoaded) details = readAuctionDetails(document);
             const { closingTime } = details;
             closing.hidden = closingTime === null;
