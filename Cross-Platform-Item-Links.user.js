@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Platform Item Links
 // @namespace    http://tampermonkey.net
-// @version      1.11
+// @version      1.12
 // @description  Open the same auction, Mercari or Flea Market item on another proxy platform.
 // @icon         https://buyee.jp/favicon.ico
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Platform-Item-Links.user.js
@@ -177,7 +177,43 @@
         let nextCheckAt = null;
         let checking = false;
         let stopped = false;
+        let checkTimer = null;
+        let countdownInterval = null;
+        let titleTimer = null;
+        let titleLevel = '';
+        let titleShown = false;
+        const baseTitle = document.title;
         panel.append(closing, countdown, price, status, nextCheck);
+
+        function alertLevel() {
+            if (stopped || details.closingTime === null) return '';
+            const remaining = details.closingTime - Date.now();
+            if (remaining <= 0 || remaining > 900000) return '';
+            return remaining <= 300000 ? 'red' : 'orange';
+        }
+
+        function blinkTitle() {
+            titleTimer = null;
+            titleLevel = alertLevel();
+            if (!titleLevel) {
+                document.title = baseTitle;
+                titleShown = false;
+                return;
+            }
+            titleShown = !titleShown;
+            const marker = titleLevel === 'red' ? '\u{1F534}' : '\u{1F7E0}';
+            document.title = titleShown ? `${marker} ${baseTitle}` : baseTitle;
+            const remaining = Math.max(0, details.closingTime - Date.now());
+            const delay = titleLevel === 'orange' ? 1000 : Math.round(200 + 800 * Math.min(1, remaining / 300000));
+            titleTimer = setTimeout(blinkTitle, delay);
+        }
+
+        function updateTitleAlert() {
+            if (alertLevel() === titleLevel) return;
+            clearTimeout(titleTimer);
+            titleShown = false;
+            blinkTitle();
+        }
 
         function updateNextCheck() {
             if (checking) nextCheck.textContent = 'Checking now...';
@@ -197,26 +233,28 @@
         function stopChecks() {
             stopped = true;
             nextCheckAt = null;
+            clearTimeout(checkTimer);
+            clearInterval(countdownInterval);
+            clearTimeout(titleTimer);
+            document.title = baseTitle;
             status.textContent = 'Checks stopped: closing time passed.';
             updateNextCheck();
         }
 
         function scheduleCheck(delay) {
-            if (Date.now() - details.closingTime > 120000) {
-                stopChecks();
-                return;
-            }
-            delay = Math.max(delay, details.closingTime - Date.now() - 600000);
+            if (stopped) return;
+            const remaining = details.closingTime - Date.now();
+            delay = Math.max(delay, remaining - 600000);
+            if (remaining > 0 && failures === 0) delay = Math.min(delay, remaining);
             nextCheckAt = Date.now() + delay;
             updateNextCheck();
-            setTimeout(checkAuction, delay);
+            clearTimeout(checkTimer);
+            checkTimer = setTimeout(checkAuction, delay);
         }
 
         async function checkAuction() {
-            if (Date.now() - details.closingTime > 120000) {
-                stopChecks();
-                return;
-            }
+            checkTimer = null;
+            if (stopped || checking) return;
             if (details.closingTime - Date.now() > 600000) {
                 scheduleCheck(0);
                 return;
@@ -227,6 +265,8 @@
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 20000);
             let retryAfter = 0;
+            const finalCheck = details.closingTime <= Date.now();
+            let reloadAfterCheck = false;
             try {
                 const response = await fetch(location.href, {
                     credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal
@@ -244,6 +284,7 @@
                 const next = readAuctionDetails(page);
                 if (next.closingTime === null) throw new Error('Closing Time (JST) missing or invalid in response');
                 if (next.price === null) throw new Error('Current price missing or invalid in response');
+                reloadAfterCheck = finalCheck && next.closingTime <= Date.now();
                 details = next;
                 remoteLoaded = true;
                 failures = 0;
@@ -260,14 +301,20 @@
                 checking = false;
                 clearTimeout(timeout);
             }
+            if (reloadAfterCheck) {
+                stopChecks();
+                location.reload();
+                return;
+            }
             const delay = failures ? Math.max(
                 Math.min(300000, 30000 * 2 ** Math.min(failures - 1, 4)) * (1 + Math.random() * 0.5),
                 Number.isFinite(retryAfter) ? retryAfter : 0
-            ) : auctionPollDelay(details.closingTime - Date.now());
+            ) : details.closingTime <= Date.now() ? 0 : auctionPollDelay(details.closingTime - Date.now());
             scheduleCheck(delay);
         }
 
         function updateClosingCountdown() {
+            if (stopped) return;
             updateNextCheck();
             if (!remoteLoaded) details = readAuctionDetails(document);
             const { closingTime } = details;
@@ -275,17 +322,22 @@
             countdown.hidden = closingTime === null;
             price.hidden = details.price === null;
             if (details.price !== null) price.textContent = `Current price: ${details.price}`;
+            updateTitleAlert();
             if (closingTime === null) return;
             closing.textContent = `Closes: ${formatter.format(closingTime)}`;
             countdown.textContent = formatTimeRemaining(closingTime, Date.now());
             if (!started) {
                 started = true;
+                if (closingTime <= Date.now()) {
+                    stopChecks();
+                    return;
+                }
                 status.textContent = 'Not yet checked; showing loaded page.';
                 scheduleCheck(auctionPollDelay(closingTime - Date.now()));
             }
         }
+        countdownInterval = setInterval(updateClosingCountdown, 1000);
         updateClosingCountdown();
-        setInterval(updateClosingCountdown, 1000);
     }
 
     function renderPanel(href = location.href) {
