@@ -1,8 +1,10 @@
 // ==UserScript==
 // @name         Image Gamma Controller (Seller Filter Production)
 // @namespace    http://tampermonkey.net
-// @version      3.7.0
+// @version      1.0
 // @description  Locked gamma controller for Buyee that targets main/maximized views, keeps thumbs synced silently, and ignores seller rating icons.
+// @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Image Gamma Controller (Seller Filter Production).user.js
+// @downloadURL  https://raw.githubusercontent.com/vladmkv/userscripts/main/Image Gamma Controller (Seller Filter Production).user.js
 // @author       Your Name
 // @match        *://buyee.jp/item/*
 // @match        *://*.buyee.jp/item/*
