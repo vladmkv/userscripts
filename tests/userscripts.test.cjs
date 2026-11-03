@@ -178,6 +178,7 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
             if (options.setValue) return options.setValue(key, value, storage);
             storage[key] = structuredClone(value);
         },
+        GM_deleteValue: key => { delete storage[key]; },
         unsafeWindow: { localStorage: legacyLocalStorage },
         document: {
             title: 'Item results',
@@ -208,15 +209,17 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
     if (options.now) context.Date = class extends Date { static now() { return options.now(); } };
     vm.runInNewContext(highlighter, context);
     tick();
-    const restore = async text => {
-        findByAction(body, 'restore').listeners.click();
+    const importFile = async (action, text) => {
+        findByAction(body, action).listeners.click();
         const input = created.findLast(element => element.tag === 'input');
         assert.equal(input.clicked, 1);
         input.files = [{ size: text.length, text: async () => text }];
         await input.listeners.change();
     };
+    const restore = text => importFile('restore', text);
+    const merge = text => importFile('merge', text);
     return {
-        card, wrapper, storage, legacyLocalStorage, id, tick, document: context.document, body, writes, errors, events, blobs, restore,
+        card, wrapper, storage, legacyLocalStorage, id, tick, document: context.document, body, writes, errors, events, blobs, restore, merge,
         timers, intervals, windowListeners, reloads: () => reloads
     };
 }
@@ -627,36 +630,83 @@ test('highlighter panel starts lower-left and remembers a move to the right', ()
 function restoreFrom(backupRegistry, answers, options = {}) {
     const url = 'https://neokyo.com/en/search/mercari';
     const item = 'https://neokyo.com/en/product/mercari/m42470092884';
-    const storage = { buyee_item_registry: { current: 'hide' }, buyee_item_registry_migrated_origins: ['https://neokyo.com'] };
+    const storage = options.storage || { buyee_item_registry: { current: 'hide' }, buyee_item_registry_migrated_origins: ['https://neokyo.com'] };
     const alerts = [];
+    const prompts = [];
     const confirms = [...answers];
     const result = scan(url, item, false, false, storage, false, {
         ...options,
-        confirm: () => confirms.shift(),
+        confirm: message => { prompts.push(message); return confirms.shift(); },
         alert: message => alerts.push(message)
     });
     const text = typeof backupRegistry === 'string' ? backupRegistry
         : JSON.stringify({ format: 'cross-market-seen-items-backup', registry: backupRegistry });
-    return { result, alerts, text };
+    return { result, alerts, prompts, text };
 }
 
-for (const [answers, expected] of [
-    [[true], { current: 'hide', restored: 'hide' }],
-    [[false, true], { restored: 'hide' }],
-    [[false, false], { current: 'hide' }]
-]) {
-    test(`restore with answers ${JSON.stringify(answers)} saves the expected registry`, async () => {
-        const { result, alerts, text } = restoreFrom({ restored: 'hide' }, answers);
-        await result.restore(text);
-        assert.deepEqual(result.storage.buyee_item_registry, expected);
-        assert.equal(alerts.length, answers.at(-1) ? 1 : 0);
-        if (answers.at(-1)) assert.match(alerts[0], /^Restore complete/);
+const legacyId = 'c1236272384,conversionType=jdirectitems_auction_DirectSearch';
+
+test('restore replaces stored data after a preview of the loss', async () => {
+    const { result, alerts, prompts, text } = restoreFrom({ restored: 'hide', current: 'kept' }, [true],
+        { storage: { buyee_item_registry: { current: 'hide', old: 'hide' }, buyee_item_registry_migrated_origins: ['https://neokyo.com'] } });
+    await result.restore(text);
+    assert.equal(prompts[0], 'Replace all 2 stored items with the 2 items from the file. 1 stored items are not in the file and will be lost.');
+    assert.deepEqual(result.storage.buyee_item_registry, { restored: 'hide', current: 'kept' });
+    assert.deepEqual(result.storage.buyee_item_registry_previous, { current: 'hide', old: 'hide' });
+    assert.equal('buyee_item_registry_staged' in result.storage, false);
+    assert.match(alerts[0], /^Restore complete: 2 items stored/);
+});
+
+test('merge adds new incoming IDs after existing ones and keeps existing values', async () => {
+    const storage = { buyee_item_registry: { a: 'kept', b: 'hide' }, buyee_item_registry_migrated_origins: ['https://neokyo.com'] };
+    const { result, alerts, prompts, text } = restoreFrom({ c: 'hide', a: 'hide', d: 'hide' }, [true], { storage });
+    await result.merge(text);
+    assert.equal(prompts[0], 'Add 2 new items. 1 incoming items already stored. 1 existing items are not in the file and will be kept.');
+    assert.deepEqual(Object.entries(result.storage.buyee_item_registry), [['a', 'kept'], ['b', 'hide'], ['c', 'hide'], ['d', 'hide']]);
+    assert.match(alerts[0], /^Merge complete: 4 items stored/);
+});
+
+for (const action of ['restore', 'merge']) {
+    test(`${action} preview cancel changes nothing`, async () => {
+        const { result, alerts, text } = restoreFrom({ restored: 'hide' }, [false]);
+        await result[action](text);
+        assert.deepEqual(result.storage.buyee_item_registry, { current: 'hide' });
+        assert.equal('buyee_item_registry_previous' in result.storage, false);
+        assert.equal(alerts.length, 0);
     });
 }
 
-test('restore rejects files that are not seen-item backups', async () => {
+test('import accepts colon IDs and fixes legacy IDs in the preview', async () => {
+    const { result, prompts, text } = restoreFrom({ 'matsucame:10074308': 'hide', [legacyId]: 'hide' }, [true]);
+    await result.merge(text);
+    assert.match(prompts[0], /\n\n1 legacy IDs will be fixed \(e\.g\. "c1236272384,conversionType=jdirectitems_auction_DirectSearch" -> "c1236272384"\)\.$/);
+    assert.deepEqual(result.storage.buyee_item_registry, { current: 'hide', 'matsucame:10074308': 'hide', c1236272384: 'hide' });
+});
+
+test('import lists unfixable entries and skips them only when confirmed', async () => {
+    const backup = { good: 'hide', 'bad id': 'hide', num: 5 };
+    const skipped = restoreFrom(backup, [true, true]);
+    await skipped.result.merge(skipped.text);
+    assert.match(skipped.prompts[0], /^2 entries in the file are invalid and cannot be fixed:\n\n"bad id": character " " not allowed\n"num": value is a number, not text\n\nSkip them and continue the merge\?$/);
+    assert.deepEqual(skipped.result.storage.buyee_item_registry, { current: 'hide', good: 'hide' });
+
+    const cancelled = restoreFrom(backup, [false]);
+    await cancelled.result.restore(cancelled.text);
+    assert.match(cancelled.prompts[0], /continue the restore\?$/);
+    assert.equal(cancelled.prompts.length, 1);
+    assert.deepEqual(cancelled.result.storage.buyee_item_registry, { current: 'hide' });
+});
+
+test('import lists at most ten invalid entries in the dialog', async () => {
+    const backup = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`bad.${i}`, 'hide']));
+    const { result, prompts, text } = restoreFrom(backup, [false]);
+    await result.merge(text);
+    assert.match(prompts[0], /"bad\.9": character "\." not allowed\n\.\.\.and 2 more \(see console\)/);
+});
+
+test('import rejects files that are not seen-item backups', async () => {
     for (const text of ['not json', JSON.stringify({ registry: { a: 'hide' } }),
-        JSON.stringify({ format: 'cross-market-seen-items-backup', registry: { '<script>': 'hide' } })]) {
+        JSON.stringify({ format: 'cross-market-seen-items-backup', registry: ['a'] })]) {
         const restore = restoreFrom(text, [true]);
         await restore.result.restore(restore.text);
         assert.deepEqual(restore.result.storage.buyee_item_registry, { current: 'hide' });
@@ -664,10 +714,102 @@ test('restore rejects files that are not seen-item backups', async () => {
     }
 });
 
-test('restore reports a failed read-back', async () => {
-    const { result, alerts, text } = restoreFrom({ restored: 'hide' }, [true], { allowErrors: true, setValue() {} });
+test('merge preview reports items pruned at the cap', async () => {
+    const current = Object.fromEntries(Array.from({ length: 60000 }, (_, i) => [`s${i}`, 'hide']));
+    const storage = { buyee_item_registry: current, buyee_item_registry_migrated_origins: ['https://neokyo.com'] };
+    const { result, prompts, text } = restoreFrom({ n1: 'hide', n2: 'hide' }, [true], { storage });
+    await result.merge(text);
+    assert.match(prompts[0], /\n\n2 oldest items will be removed to stay within 60000 items\.$/);
+    const saved = result.storage.buyee_item_registry;
+    assert.equal(Object.keys(saved).length, 60000);
+    assert.equal('s0' in saved, false);
+    assert.equal(saved.n2, 'hide');
+});
+
+test('a failed snapshot leaves stored data untouched', async () => {
+    const { result, alerts, text } = restoreFrom({ restored: 'hide' }, [true], {
+        allowErrors: true,
+        setValue(key, value, storage) { if (key !== 'buyee_item_registry_previous') storage[key] = structuredClone(value); }
+    });
     await result.restore(text);
-    assert.match(alerts[0], /^Restore failed: the data could not be saved/);
+    assert.deepEqual(result.storage.buyee_item_registry, { current: 'hide' });
+    assert.equal(result.writes.includes('buyee_item_registry_staged'), false);
+    assert.match(alerts[0], /Stored data was not changed/);
+});
+
+test('a failed staging write leaves the main key untouched', async () => {
+    const { result, alerts, text } = restoreFrom({ restored: 'hide' }, [true], {
+        allowErrors: true,
+        setValue(key, value, storage) { if (key !== 'buyee_item_registry_staged') storage[key] = structuredClone(value); }
+    });
+    await result.restore(text);
+    assert.deepEqual(result.storage.buyee_item_registry, { current: 'hide' });
+    assert.equal(result.writes.filter(key => key === 'buyee_item_registry').length, 0);
+    assert.equal('buyee_item_registry_staged' in result.storage, false);
+    assert.match(alerts[0], /Stored data was not changed/);
+});
+
+test('a failed main write puts the previous data back', async () => {
+    let mainWrites = 0;
+    const { result, alerts, text } = restoreFrom({ restored: 'hide' }, [true], {
+        allowErrors: true,
+        setValue(key, value, storage) {
+            if (key === 'buyee_item_registry' && ++mainWrites === 1) { storage[key] = { partial: 'hide' }; return; }
+            storage[key] = structuredClone(value);
+        }
+    });
+    await result.restore(text);
+    assert.deepEqual(result.storage.buyee_item_registry, { current: 'hide' });
+    assert.equal('buyee_item_registry_staged' in result.storage, false);
+    assert.match(alerts[0], /Previous data was put back/);
+});
+
+test('a failed rollback offers the in-memory previous data as a download', async () => {
+    const { result, prompts, text } = restoreFrom({ restored: 'hide' }, [true, true], {
+        allowErrors: true,
+        setValue(key, value, storage) {
+            if (key === 'buyee_item_registry') { storage[key] = { broken: 'hide' }; return; }
+            storage[key] = structuredClone(value);
+        }
+    });
+    await result.restore(text);
+    assert.match(prompts[1], /putting the previous data back also failed/);
+    assert.equal(result.blobs.length, 1);
+    const downloaded = JSON.parse(await result.blobs[0].text());
+    assert.deepEqual(downloaded.registry, { current: 'hide' });
+});
+
+test('fix button appears only for invalid stored IDs and rewrites legacy IDs', () => {
+    const clean = restoreFrom({}, []);
+    assert.equal(findByAction(clean.result.body, 'fix-ids').hidden, true);
+
+    const storage = {
+        buyee_item_registry: { a: 'hide', [legacyId]: 'kept', 'x y': 'hide', c1236272384: 'hide' },
+        buyee_item_registry_migrated_origins: ['https://neokyo.com']
+    };
+    const { result, prompts, alerts } = restoreFrom({}, [true], { storage });
+    const button = findByAction(result.body, 'fix-ids');
+    assert.equal(button.hidden, false);
+    button.listeners.click();
+    assert.match(prompts[0], /^Fix 1 legacy IDs \(e\.g\. ".*" -> "c1236272384"\)\.\n\n1 invalid IDs cannot be fixed and will stay:\n"x y": character " " not allowed$/);
+    assert.deepEqual(result.storage.buyee_item_registry, { a: 'hide', c1236272384: 'hide', 'x y': 'hide' });
+    assert.equal(result.storage.buyee_item_registry_previous[legacyId], 'kept');
+    assert.match(alerts[0], /^Fixed 1 IDs/);
+    assert.equal(button.hidden, false);
+});
+
+test('fix cancel changes nothing', () => {
+    const storage = { buyee_item_registry: { [legacyId]: 'hide' }, buyee_item_registry_migrated_origins: ['https://neokyo.com'] };
+    const { result } = restoreFrom({}, [false], { storage });
+    findByAction(result.body, 'fix-ids').listeners.click();
+    assert.deepEqual(result.storage.buyee_item_registry, { [legacyId]: 'hide' });
+    assert.equal('buyee_item_registry_previous' in result.storage, false);
+});
+
+test('invalid item IDs are not recorded', () => {
+    const result = scan('https://zenmarket.jp/en/search.aspx', 'https://zenmarket.jp/product.aspx?itemCode=bad%20id', false, true);
+    assert.deepEqual(result.storage.buyee_item_registry, {});
+    assert.equal(result.writes.includes('buyee_item_registry'), false);
 });
 
 test('late shared-storage updates do not hide or frame cards in this visit', () => {

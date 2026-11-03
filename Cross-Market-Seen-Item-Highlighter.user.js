@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Market Seen Item Highlighter
 // @namespace    http://tampermonkey.net
-// @version      7.29
+// @version      7.30
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
 // @downloadURL  https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
 // @description  Tracks seen item IDs across Buyee, ZenMarket, and Neokyo search feeds.
@@ -18,6 +18,7 @@
 // @match        *://neokyo.com/en/search/mercari*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
 // @grant        unsafeWindow
 // ==/UserScript==
 
@@ -31,8 +32,14 @@
     const MIGRATED_ORIGINS_KEY = 'buyee_item_registry_migrated_origins';
     const LEGACY_CLEANUP_ORIGINS_KEY = 'buyee_item_registry_legacy_cleanup_origins';
     const PANEL_SIDE_KEY = 'seen_item_panel_side';
+    const SNAPSHOT_KEY = 'buyee_item_registry_previous';
+    const STAGED_KEY = 'buyee_item_registry_staged';
     const BACKUP_FORMAT = 'cross-market-seen-items-backup';
     const MAX_BACKUP_BYTES = 20 * 1024 * 1024;
+    const ID_PATTERN = /^[a-zA-Z0-9_:-]+$/;
+    // Older Buyee extraction kept URL tracking text after a comma, e.g. "c123,conversionType=...".
+    const LEGACY_ID_PATTERN = /^([a-zA-Z0-9_:-]+),/;
+    const MAX_LISTED_PROBLEMS = 10;
     const RELOAD_MIN_MS = 5 * 60000;
     const RELOAD_MAX_MS = 10 * 60000;
     const RELOAD_POSTPONE_MS = 60000;
@@ -125,6 +132,8 @@
     const seenThisVisit = new Set();
     const pendingWrites = new Set();
     const hiddenElements = new Set();
+    const reportedInvalidIds = new Set();
+    let invalidStoredCount = 0;
     let showHidden = false;
     let panelElements = null;
     let writeRetryAt = 0;
@@ -251,6 +260,13 @@
     }
 
     function markSeen(itemId) {
+        if (!ID_PATTERN.test(itemId)) {
+            if (!reportedInvalidIds.has(itemId)) {
+                console.warn(`[Cross-Market Seen Item Highlighter] Not saving item ID "${itemId}": it contains characters that are not allowed.`);
+                reportedInvalidIds.add(itemId);
+            }
+            return;
+        }
         itemRegistry[itemId] = 'hide';
         pendingWrites.add(itemId);
     }
@@ -295,6 +311,10 @@
     function downloadBackup() {
         const registry = readStoredRegistry();
         pendingWrites.forEach(id => { registry[id] = 'hide'; });
+        downloadRegistry(registry);
+    }
+
+    function downloadRegistry(registry) {
         const backup = {
             format: BACKUP_FORMAT,
             version: 1,
@@ -313,47 +333,169 @@
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
-    function isValidRegistry(registry) {
-        return registry && typeof registry === 'object' && !Array.isArray(registry)
-            && Object.entries(registry).every(([id, value]) => /^[a-zA-Z0-9_-]+$/.test(id) && typeof value === 'string');
+    function describeInvalidEntry(id, value) {
+        if (typeof value !== 'string') {
+            const kind = value === null ? 'null' : Array.isArray(value) ? 'an array'
+                : typeof value === 'object' ? 'an object' : `a ${typeof value}`;
+            return `"${id}": value is ${kind}, not text`;
+        }
+        const badChar = [...id].find(char => !ID_PATTERN.test(char));
+        return badChar === undefined ? `"${id}": empty ID` : `"${id}": character "${badChar}" not allowed`;
     }
 
-    function applyBackup(text) {
+    // Valid entries keep their order; fixed legacy IDs are appended unless the fixed ID already exists.
+    function sanitizeRegistry(registry) {
+        const clean = {};
+        const legacy = [];
+        const invalid = [];
+        Object.entries(registry).forEach(([id, value]) => {
+            if (typeof value === 'string' && ID_PATTERN.test(id)) clean[id] = value;
+            else if (typeof value === 'string' && LEGACY_ID_PATTERN.test(id)) legacy.push([id, value]);
+            else invalid.push([id, value]);
+        });
+        const fixed = legacy.map(([id, value]) => {
+            const fixedId = id.match(LEGACY_ID_PATTERN)[1];
+            if (!Object.hasOwn(clean, fixedId)) clean[fixedId] = value;
+            return [id, fixedId];
+        });
+        return { clean, fixed, invalid };
+    }
+
+    function countInvalidStoredIds() {
+        return Object.entries(readStoredRegistry())
+            .filter(([id, value]) => typeof value !== 'string' || !ID_PATTERN.test(id)).length;
+    }
+
+    function fixExample(fixed) {
+        return fixed.length > 0 ? ` (e.g. "${fixed[0][0]}" -> "${fixed[0][1]}")` : '';
+    }
+
+    function listInvalidEntries(invalid, source) {
+        const lines = invalid.map(([id, value]) => describeInvalidEntry(id, value));
+        console.warn(`[Cross-Market Seen Item Highlighter] ${invalid.length} invalid entries in ${source}:\n${lines.join('\n')}`);
+        const shown = lines.slice(0, MAX_LISTED_PROBLEMS);
+        const more = lines.length > shown.length ? `\n...and ${lines.length - shown.length} more (see console)` : '';
+        return `${shown.join('\n')}${more}`;
+    }
+
+    // Throws unless the key reads back with exactly the written entries.
+    function writeVerified(key, registry) {
+        GM_setValue(key, registry);
+        const saved = GM_getValue(key, null);
+        const ids = Object.keys(registry);
+        if (!saved || typeof saved !== 'object' || Array.isArray(saved)
+            || Object.keys(saved).length !== ids.length || ids.some(id => saved[id] !== registry[id])) {
+            throw new Error(`${key} did not read back as written`);
+        }
+    }
+
+    // Main key is written only after the snapshot and a staged copy verified; returns true on success.
+    function commitRegistry(candidate) {
+        const before = readStoredRegistry();
+        try {
+            writeVerified(SNAPSHOT_KEY, before);
+            writeVerified(STAGED_KEY, candidate);
+        } catch (error) {
+            console.error('[Cross-Market Seen Item Highlighter] Could not prepare the change; stored data was not touched.', error);
+            GM_deleteValue(STAGED_KEY);
+            window.alert('Failed: the new data could not be saved. Stored data was not changed.');
+            return false;
+        }
+        try {
+            writeVerified(REGISTRY_KEY, candidate);
+            GM_deleteValue(STAGED_KEY);
+            itemRegistry = readStoredRegistry();
+            pendingWrites.clear();
+            console.info(`[Cross-Market Seen Item Highlighter] Change saved. Previous registry kept in ${SNAPSHOT_KEY} until the next change.`);
+            return true;
+        } catch (error) {
+            console.error('[Cross-Market Seen Item Highlighter] Saving failed; putting previous data back.', error);
+        }
+        try {
+            writeVerified(REGISTRY_KEY, before);
+            GM_deleteValue(STAGED_KEY);
+            window.alert('Failed: the data could not be saved. Previous data was put back.');
+        } catch (error) {
+            console.error(`[Cross-Market Seen Item Highlighter] Putting previous data back failed. A copy is in ${SNAPSHOT_KEY}.`, error);
+            if (window.confirm('Failed: the data could not be saved, and putting the previous data back also failed.\n\nOK = download the previous data as a backup file. Restore it later with "Restore data".')) {
+                downloadRegistry(before);
+            }
+        }
+        return false;
+    }
+
+    function parseBackup(text) {
         let backup = null;
         try {
             backup = JSON.parse(text);
         } catch {
             backup = null;
         }
-        if (backup?.format !== BACKUP_FORMAT || !isValidRegistry(backup.registry)) {
-            window.alert('Restore failed: this is not a seen-items backup file.');
+        const registry = backup?.registry;
+        if (backup?.format !== BACKUP_FORMAT || !registry || typeof registry !== 'object' || Array.isArray(registry)) {
+            window.alert('Import failed: this is not a seen-items backup file.');
+            return null;
+        }
+        return registry;
+    }
+
+    function importBackup(text, mode) {
+        const registry = parseBackup(text);
+        if (!registry) return;
+        const { clean: incoming, fixed, invalid } = sanitizeRegistry(registry);
+        const action = mode === 'merge' ? 'merge' : 'restore';
+        if (invalid.length > 0 && !window.confirm(`${invalid.length} entries in the file are invalid and cannot be fixed:\n\n${listInvalidEntries(invalid, 'the backup file')}\n\nSkip them and continue the ${action}?`)) {
             return;
         }
         const current = readStoredRegistry();
         const currentCount = Object.keys(current).length;
-        const backupCount = Object.keys(backup.registry).length;
-        let restored;
-        if (window.confirm(`Merge ${backupCount} backed-up items into the ${currentCount} stored items?\n\nOK = merge. Cancel = choose replace instead.`)) {
-            restored = { ...current, ...backup.registry };
-        } else if (window.confirm(`Replace all ${currentCount} stored items with the ${backupCount} backed-up items?\n\nItems not in the backup will be forgotten.`)) {
-            restored = { ...backup.registry };
+        const incomingIds = Object.keys(incoming);
+        const matching = incomingIds.filter(id => Object.hasOwn(current, id)).length;
+        let candidate;
+        let preview;
+        if (mode === 'merge') {
+            candidate = { ...current };
+            incomingIds.forEach(id => { if (!Object.hasOwn(candidate, id)) candidate[id] = incoming[id]; });
+            preview = `Add ${incomingIds.length - matching} new items. ${matching} incoming items already stored. ${currentCount - matching} existing items are not in the file and will be kept.`;
         } else {
-            return;
+            candidate = { ...incoming };
+            preview = `Replace all ${currentCount} stored items with the ${incomingIds.length} items from the file. ${currentCount - matching} stored items are not in the file and will be lost.`;
         }
-        pendingWrites.forEach(id => { restored[id] = 'hide'; });
-        pruneRegistry(restored);
-        try {
-            itemRegistry = saveVerified(restored);
-            pendingWrites.clear();
-            window.alert(`Restore complete: ${Object.keys(itemRegistry).length} items stored. Reload to hide restored items on this page.`);
-        } catch (error) {
-            console.error('[Cross-Market Seen Item Highlighter] Restore failed.', error);
-            window.alert('Restore failed: the data could not be saved completely. Try restoring the backup again.');
+        pendingWrites.forEach(id => { candidate[id] = 'hide'; });
+        const notes = [preview];
+        if (fixed.length > 0) notes.push(`${fixed.length} legacy IDs will be fixed${fixExample(fixed)}.`);
+        const unprunedCount = Object.keys(candidate).length;
+        pruneRegistry(candidate);
+        const prunedCount = unprunedCount - Object.keys(candidate).length;
+        if (prunedCount > 0) notes.push(`${prunedCount} oldest items will be removed to stay within ${MAX_TRACKED_ITEMS} items.`);
+        if (!window.confirm(notes.join('\n\n'))) return;
+        if (commitRegistry(candidate)) {
+            const label = mode === 'merge' ? 'Merge' : 'Restore';
+            window.alert(`${label} complete: ${Object.keys(itemRegistry).length} items stored. Reload to hide imported items on this page.`);
         }
+        invalidStoredCount = countInvalidStoredIds();
         updatePanel();
     }
 
-    function chooseBackupFile() {
+    function fixStoredIds() {
+        const { clean, fixed, invalid } = sanitizeRegistry(readStoredRegistry());
+        const unfixable = invalid.length > 0
+            ? `\n\n${invalid.length} invalid IDs cannot be fixed and will stay:\n${listInvalidEntries(invalid, 'stored data')}`
+            : '';
+        if (fixed.length === 0) {
+            window.alert(`Nothing to fix automatically.${unfixable}`);
+        } else if (window.confirm(`Fix ${fixed.length} legacy IDs${fixExample(fixed)}.${unfixable}`)) {
+            const candidate = { ...clean, ...Object.fromEntries(invalid) };
+            pendingWrites.forEach(id => { candidate[id] = 'hide'; });
+            if (commitRegistry(candidate)) {
+                window.alert(`Fixed ${fixed.length} IDs. ${Object.keys(itemRegistry).length} items stored.`);
+            }
+        }
+        invalidStoredCount = countInvalidStoredIds();
+        updatePanel();
+    }
+
+    function chooseBackupFile(mode) {
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = 'application/json,.json';
@@ -361,10 +503,10 @@
             const file = input.files?.[0];
             if (!file) return;
             if (file.size > MAX_BACKUP_BYTES) {
-                window.alert('Restore failed: the file is too large to be a seen-items backup.');
+                window.alert('Import failed: the file is too large to be a seen-items backup.');
                 return;
             }
-            applyBackup(await file.text());
+            importBackup(await file.text(), mode);
         });
         input.click();
     }
@@ -420,12 +562,15 @@
         const countdown = document.createElement('p');
         const toggle = createButton('Show hidden items', 'toggle-hidden', toggleHiddenItems);
         const backup = createButton('Back up data', 'backup', downloadBackup);
-        const restore = createButton('Restore data', 'restore', chooseBackupFile);
+        const restore = createButton('Restore data', 'restore', () => chooseBackupFile('replace'));
+        const merge = createButton('Merge data', 'merge', () => chooseBackupFile('merge'));
+        const fix = createButton('Fix invalid IDs', 'fix-ids', fixStoredIds);
         const move = createButton('Move panel right', 'move-panel', movePanel);
-        panel.append(total, hidden, pending, countdown, toggle, backup, restore, move);
+        panel.append(total, hidden, pending, countdown, toggle, backup, restore, merge, fix, move);
         root.append(style, panel);
         document.body.append(host);
-        panelElements = { host, total, hidden, pending, countdown, toggle, move };
+        panelElements = { host, total, hidden, pending, countdown, toggle, fix, move };
+        invalidStoredCount = countInvalidStoredIds();
         applyPanelSide();
         updateReloadCountdown();
     }
@@ -438,6 +583,7 @@
         panelElements.pending.textContent = `Not yet saved: ${pendingWrites.size}`;
         panelElements.toggle.textContent = showHidden ? 'Hide seen items' : 'Show hidden items';
         panelElements.toggle.setAttribute('aria-pressed', String(showHidden));
+        panelElements.fix.hidden = invalidStoredCount === 0;
         updateReloadCountdown();
     }
 
