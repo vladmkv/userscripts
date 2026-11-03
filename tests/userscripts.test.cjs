@@ -798,6 +798,17 @@ test('fix button appears only for invalid stored IDs and rewrites legacy IDs', (
     assert.equal(button.hidden, false);
 });
 
+test('data management buttons are grouped in a collapsed submenu', () => {
+    const { result } = restoreFrom({}, []);
+    const section = result.body.children[0].shadowRoot.children.find(node => node.tag === 'section');
+    const menu = section.children.find(node => node.tag === 'details');
+    assert.equal(menu.open, undefined);
+    assert.equal(menu.children[0].tag, 'summary');
+    assert.equal(menu.children[0].textContent, 'Manage data');
+    assert.deepEqual(menu.children[1].children.map(node => node.attributes['data-action']), ['backup', 'restore', 'merge', 'fix-ids']);
+    assert.deepEqual(section.children.filter(node => node.tag === 'button').map(node => node.attributes['data-action']), ['toggle-hidden', 'move-panel']);
+});
+
 test('fix cancel changes nothing', () => {
     const storage = { buyee_item_registry: { [legacyId]: 'hide' }, buyee_item_registry_migrated_origins: ['https://neokyo.com'] };
     const { result } = restoreFrom({}, [false], { storage });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Market Seen Item Highlighter
 // @namespace    http://tampermonkey.net
-// @version      7.30
+// @version      7.31
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
 // @downloadURL  https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
 // @description  Tracks seen item IDs across Buyee, ZenMarket, and Neokyo search feeds.
@@ -552,6 +552,10 @@
             button { min-height: 32px; padding: 5px 8px; border: 1px solid #777; border-radius: 3px; background: #f5f5f5; color: #202020; font: inherit; cursor: pointer; }
             button:hover { background: #e5f3e8; }
             button:focus-visible { outline: 2px solid #14652c; outline-offset: 2px; }
+            summary { min-height: 32px; box-sizing: border-box; padding: 5px 8px; border: 1px solid #777; border-radius: 3px; background: #f5f5f5; cursor: pointer; }
+            summary:hover { background: #e5f3e8; }
+            summary:focus-visible { outline: 2px solid #14652c; outline-offset: 2px; }
+            .data-actions { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
         `;
         const panel = document.createElement('section');
         panel.setAttribute('aria-label', 'Seen item registry');
@@ -566,7 +570,14 @@
         const merge = createButton('Merge data', 'merge', () => chooseBackupFile('merge'));
         const fix = createButton('Fix invalid IDs', 'fix-ids', fixStoredIds);
         const move = createButton('Move panel right', 'move-panel', movePanel);
-        panel.append(total, hidden, pending, countdown, toggle, backup, restore, merge, fix, move);
+        const dataMenu = document.createElement('details');
+        const dataSummary = document.createElement('summary');
+        dataSummary.textContent = 'Manage data';
+        const dataActions = document.createElement('div');
+        dataActions.className = 'data-actions';
+        dataActions.append(backup, restore, merge, fix);
+        dataMenu.append(dataSummary, dataActions);
+        panel.append(total, hidden, pending, countdown, toggle, dataMenu, move);
         root.append(style, panel);
         document.body.append(host);
         panelElements = { host, total, hidden, pending, countdown, toggle, fix, move };
