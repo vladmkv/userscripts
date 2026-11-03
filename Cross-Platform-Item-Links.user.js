@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cross-Platform Item Links
 // @namespace    http://tampermonkey.net
-// @version      1.12
+// @version      1.13
 // @description  Open the same auction, Mercari or Flea Market item on another proxy platform.
 // @icon         https://buyee.jp/favicon.ico
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Platform-Item-Links.user.js
@@ -141,7 +141,9 @@
         const row = Array.from(page.querySelectorAll('.itemDetail__list')).find(element =>
             element.querySelector('.itemDetail__listName')?.textContent.trim() === 'Closing Time (JST)');
         const closingTime = parseClosingTime(row?.querySelector('.itemDetail__listValue')?.textContent || '');
-        const priceText = page.querySelector('.current_price .price')?.textContent || '';
+        const priceBlock = Array.from(page.querySelectorAll('dl.current_price')).find(element =>
+            element.querySelector('dt')?.textContent.trim() === 'Current Price');
+        const priceText = priceBlock?.querySelector('.price')?.textContent || '';
         const price = priceText.match(/^\s*([\d,]+)\s+YEN\b/i);
         return { closingTime, price: price ? `${price[1]} YEN` : null };
     }
