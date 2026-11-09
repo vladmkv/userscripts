@@ -131,7 +131,9 @@ function panelText(body) {
 
 function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBottom = false, options = {}) {
     const location = new URL(pageUrl);
-    const id = location.hostname === 'zenmarket.jp'
+    const id = location.hostname === 'www.ebay.com'
+        ? `ebay_${new URL(itemUrl).pathname.split('/').filter(Boolean).at(-1)}`
+        : location.hostname === 'zenmarket.jp'
         ? new URL(itemUrl).searchParams.get('itemCode')
         : new URL(itemUrl).pathname.split('/').filter(Boolean).at(-1);
     const storage = existingStorage || {
@@ -147,7 +149,8 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
         getBoundingClientRect: () => ({ top: offscreen ? -200 : 100, bottom: offscreen ? -10 : 300 })
     };
     const link = { href: itemUrl, closest: () => card };
-    card.querySelector = () => link;
+    const cardSelectors = [];
+    card.querySelector = selector => { cardSelectors.push(selector); return link; };
     const legacyLocalStorage = {
         buyee_item_registry: 'legacy-copy',
         removeItem(key) { delete this[key]; }
@@ -187,7 +190,7 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
             documentElement: { scrollHeight: atBottom ? 900 : 5000 },
             querySelectorAll: query => {
                 if (query.startsWith('a[href*=')) return [link];
-                if (query.includes('product-item') || query === '.product-card.auction'
+                if (query.includes('product-item') || query === '.product-card.auction' || query === 'ul.srp-results > li.s-card'
                     || query.startsWith('#content_inner')) return [card];
                 return [];
             }
@@ -219,7 +222,7 @@ function scan(pageUrl, itemUrl, seen, offscreen = false, existingStorage, atBott
     const restore = text => importFile('restore', text);
     const merge = text => importFile('merge', text);
     return {
-        card, wrapper, storage, legacyLocalStorage, id, tick, document: context.document, body, writes, errors, events, blobs, restore, merge,
+        card, cardSelectors, wrapper, storage, legacyLocalStorage, id, tick, document: context.document, body, writes, errors, events, blobs, restore, merge,
         timers, intervals, windowListeners, reloads: () => reloads
     };
 }
@@ -322,6 +325,67 @@ function scanBuyeeDetailRecommendations(pageUrl, cards, existingStorage, options
         tick
     };
 }
+
+test('eBay search marks scrolled items, frames them, and hides them after reload', () => {
+    const url = 'https://www.ebay.com/sch/293/i.html?_nkw=sony+watchman&_pgn=3';
+    const item = 'https://www.ebay.com/itm/267830127486?hash=item3e5beb6b7e';
+    const unseen = scan(url, item, false);
+    assert.equal(unseen.storage.buyee_item_registry[unseen.id], undefined);
+    const scrolled = scan(url, item, false, true);
+    assert.equal(scrolled.storage.buyee_item_registry.ebay_267830127486, 'hide');
+    assert.equal(scrolled.card.style.border, '4px dashed #e74c3c');
+    assert.ok(scrolled.cardSelectors.includes('a[href*="/itm/"]'));
+    scrolled.tick();
+    assert.equal(scrolled.card.style.display, undefined);
+    const reloaded = scan(url, item, false, false, scrolled.storage);
+    assert.equal(reloaded.card.style.display, 'none');
+    assert.equal(reloaded.card.style.border, '4px dashed #e74c3c');
+});
+
+test('eBay search accepts slug URLs, sweeps at the bottom, and schedules the title alarm', () => {
+    const url = 'https://www.ebay.com/sch/i.html?_nkw=watchman';
+    const item = 'https://www.ebay.com/itm/sony-watchman/267830127486?tracking=example';
+    const unseen = scan(url, item, false);
+    assert.ok(highlighter.includes('// @match        *://www.ebay.com/sch/*'));
+    assert.equal(unseen.document.title, '\u{1F534} (1) Item results');
+    assert.equal(pendingTimers(unseen, 'tryAutoReload').length, 0);
+    const swept = scan(url, item, false, false, undefined, true);
+    assert.equal(swept.storage.buyee_item_registry.ebay_267830127486, 'hide');
+    assert.equal(swept.card.style.border, '4px dashed #e74c3c');
+});
+
+test('eBay auto refresh defaults off and persists when enabled or disabled', () => {
+    const url = 'https://www.ebay.com/sch/293/i.html';
+    const item = 'https://www.ebay.com/itm/267830127486';
+    const result = scan(url, item, false);
+    const toggle = findByAction(result.body, 'toggle-auto-refresh');
+    assert.equal(toggle.textContent, 'Enable auto refresh');
+    assert.equal(toggle.attributes['aria-pressed'], 'false');
+    assert.ok(panelText(result.body).includes('Auto refresh: off'));
+    assert.equal(pendingTimers(result, 'tryAutoReload').length, 0);
+    toggle.listeners.click();
+    assert.equal(result.storage.seen_item_ebay_auto_reload, true);
+    assert.equal(toggle.attributes['aria-pressed'], 'true');
+    const [reload] = pendingTimers(result, 'tryAutoReload');
+    assert.ok(reload.ms >= 300000 && reload.ms <= 600000);
+    assert.equal(pendingTimers(scan(url, item, false, false, result.storage), 'tryAutoReload').length, 1);
+    toggle.listeners.click();
+    assert.equal(result.storage.seen_item_ebay_auto_reload, false);
+    assert.equal(toggle.attributes['aria-pressed'], 'false');
+    assert.equal(pendingTimers(result, 'tryAutoReload').length, 0);
+    assert.equal(pendingIntervals(result, 'updateReloadCountdown').length, 0);
+    assert.equal(pendingTimers(scan(url, item, false, false, result.storage), 'tryAutoReload').length, 0);
+});
+
+test('eBay search ignores non-eBay item links and unrelated paths', () => {
+    const url = 'https://www.ebay.com/sch/293/i.html';
+    const foreign = scan(url, 'https://example.com/itm/267830127486', false, true);
+    assert.deepEqual(foreign.storage.buyee_item_registry, {});
+    assert.equal(foreign.card.style.border, undefined);
+    const unrelated = scan('https://www.ebay.com/sch/other', 'https://www.ebay.com/itm/267830127486', false, true);
+    assert.deepEqual(unrelated.storage.buyee_item_registry, {});
+    assert.equal(pendingTimers(unrelated, 'tryAutoReload').length, 0);
+});
 
 for (const marketplace of ['yahoo', 'mercari', 'yahooFleaMarket']) {
     for (const slash of ['', '/']) {

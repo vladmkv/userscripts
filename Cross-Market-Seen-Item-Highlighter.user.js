@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Cross-Market Seen Item Highlighter
 // @namespace    http://tampermonkey.net
-// @version      7.31
+// @version      7.33
 // @updateURL    https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
 // @downloadURL  https://raw.githubusercontent.com/vladmkv/userscripts/main/Cross-Market-Seen-Item-Highlighter.user.js
-// @description  Tracks seen item IDs across Buyee, ZenMarket, and Neokyo search feeds.
+// @description  Tracks seen item IDs across Buyee, ZenMarket, Neokyo, and eBay search feeds.
 // @author       You
 // @match        *://*.buyee.jp/item/search*
 // @match        *://*.buyee.jp/mercari/search*
@@ -16,6 +16,7 @@
 // @match        *://zenmarket.jp/auction.aspx*
 // @match        *://neokyo.com/en/search/yahoo*
 // @match        *://neokyo.com/en/search/mercari*
+// @match        *://www.ebay.com/sch/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
@@ -32,6 +33,7 @@
     const MIGRATED_ORIGINS_KEY = 'buyee_item_registry_migrated_origins';
     const LEGACY_CLEANUP_ORIGINS_KEY = 'buyee_item_registry_legacy_cleanup_origins';
     const PANEL_SIDE_KEY = 'seen_item_panel_side';
+    const EBAY_AUTO_RELOAD_KEY = 'seen_item_ebay_auto_reload';
     const SNAPSHOT_KEY = 'buyee_item_registry_previous';
     const STAGED_KEY = 'buyee_item_registry_staged';
     const BACKUP_FORMAT = 'cross-market-seen-items-backup';
@@ -75,8 +77,12 @@
         return /^\/(?:item\/jdirectitems\/auction|mercari\/item|paypayfleamarket\/item)\/[a-zA-Z0-9_-]+(?:\/|$)/.test(location.pathname);
     }
 
+    function isEbaySearch() {
+        return location.hostname === 'www.ebay.com' && /^\/sch\/(?:[^/]+\/)?i\.html$/i.test(location.pathname);
+    }
+
     function isSearchPage() {
-        return isZenMarketSearch() || isNeokyoSearch()
+        return isZenMarketSearch() || isNeokyoSearch() || isEbaySearch()
             || (isBuyeeSite() && /^\/(?:item|mercari)\/search(?:\/|$)/.test(location.pathname));
     }
 
@@ -147,6 +153,7 @@
     let reloadDueAt = 0;
     let reloadTimeoutHandle = null;
     let reloadCountdownInterval = null;
+    let ebayAutoReload = isEbaySearch() && GM_getValue(EBAY_AUTO_RELOAD_KEY, false) === true;
 
     function formatReloadCountdown(msRemaining) {
         const totalSeconds = Math.max(0, Math.ceil(msRemaining / 1000));
@@ -158,7 +165,7 @@
     function updateReloadCountdown() {
         if (!panelElements || !panelElements.countdown) return;
         if (!reloadDueAt) {
-            panelElements.countdown.textContent = 'Next reload: --:--';
+            panelElements.countdown.textContent = isEbaySearch() && !ebayAutoReload ? 'Auto refresh: off' : 'Next reload: --:--';
             return;
         }
         const remaining = Math.max(0, reloadDueAt - Date.now());
@@ -217,6 +224,21 @@
         reloadCountdownInterval = setInterval(updateReloadCountdown, 1000);
         updateReloadCountdown();
         reloadTimeoutHandle = setTimeout(tryAutoReload, delay);
+    }
+
+    function toggleEbayAutoReload() {
+        ebayAutoReload = !ebayAutoReload;
+        GM_setValue(EBAY_AUTO_RELOAD_KEY, ebayAutoReload);
+        if (ebayAutoReload) {
+            scheduleAutoReload(randomBetween(RELOAD_MIN_MS, RELOAD_MAX_MS));
+        } else {
+            clearTimeout(reloadTimeoutHandle);
+            clearInterval(reloadCountdownInterval);
+            reloadTimeoutHandle = null;
+            reloadCountdownInterval = null;
+            reloadDueAt = 0;
+        }
+        updatePanel();
     }
 
     // Waits while the user is scrolling or seen items are not yet saved, so no marks are lost.
@@ -577,10 +599,13 @@
         dataActions.className = 'data-actions';
         dataActions.append(backup, restore, merge, fix);
         dataMenu.append(dataSummary, dataActions);
-        panel.append(total, hidden, pending, countdown, toggle, dataMenu, move);
+        panel.append(total, hidden, pending, countdown, toggle);
+        const reloadToggle = isEbaySearch() ? createButton('Enable auto refresh', 'toggle-auto-refresh', toggleEbayAutoReload) : null;
+        if (reloadToggle) panel.append(reloadToggle);
+        panel.append(dataMenu, move);
         root.append(style, panel);
         document.body.append(host);
-        panelElements = { host, total, hidden, pending, countdown, toggle, fix, move };
+        panelElements = { host, total, hidden, pending, countdown, toggle, reloadToggle, fix, move };
         invalidStoredCount = countInvalidStoredIds();
         applyPanelSide();
         updateReloadCountdown();
@@ -594,6 +619,10 @@
         panelElements.pending.textContent = `Not yet saved: ${pendingWrites.size}`;
         panelElements.toggle.textContent = showHidden ? 'Hide seen items' : 'Show hidden items';
         panelElements.toggle.setAttribute('aria-pressed', String(showHidden));
+        if (panelElements.reloadToggle) {
+            panelElements.reloadToggle.textContent = ebayAutoReload ? 'Disable auto refresh' : 'Enable auto refresh';
+            panelElements.reloadToggle.setAttribute('aria-pressed', String(ebayAutoReload));
+        }
         panelElements.fix.hidden = invalidStoredCount === 0;
         updateReloadCountdown();
     }
@@ -606,6 +635,10 @@
     }
 
     function getTargetListingCards() {
+        if (isEbaySearch()) {
+            return document.querySelectorAll('ul.srp-results > li.s-card');
+        }
+
         if (isNeokyoSearch()) {
             if (/\/(?:mercari|yahoofleamarket)\/?$/i.test(location.pathname)) {
                 const marketplace = /\/mercari\/?$/i.test(location.pathname) ? 'mercari' : 'yahooFleaMarket';
@@ -632,6 +665,17 @@
     }
 
     function getItemId(href) {
+        if (isEbaySearch()) {
+            try {
+                const itemUrl = new URL(href, location.href);
+                const match = itemUrl.pathname.match(/^\/itm\/(?:[^/]+\/)?(\d+)\/?$/i);
+                return (itemUrl.hostname === 'ebay.com' || itemUrl.hostname === 'www.ebay.com') && match
+                    ? `ebay_${match[1]}` : null;
+            } catch (error) {
+                return null;
+            }
+        }
+
         if (isNeokyoSearch()) {
             try {
                 const itemUrl = new URL(href, location.href);
@@ -775,7 +819,8 @@
 
         let unseenCount = 0;
         cards.forEach(card => {
-            const linkSelector = isNeokyoSearch() ? 'a[href*="/en/product/"]' : 'a[href*="/item/"]';
+            const linkSelector = isEbaySearch() ? 'a[href*="/itm/"]'
+                : isNeokyoSearch() ? 'a[href*="/en/product/"]' : 'a[href*="/item/"]';
             const link = card.tagName === 'A' ? card : card.querySelector(linkSelector);
             if (!link) return;
 
@@ -834,5 +879,5 @@
     window.addEventListener('scroll', () => { lastScrollAt = Date.now(); });
     window.addEventListener('scroll', runStateEngineSafely);
     setInterval(runStateEngineSafely, 1500);
-    if (isSearchPage()) scheduleAutoReload(randomBetween(RELOAD_MIN_MS, RELOAD_MAX_MS));
+    if (isSearchPage() && (!isEbaySearch() || ebayAutoReload)) scheduleAutoReload(randomBetween(RELOAD_MIN_MS, RELOAD_MAX_MS));
 })();
